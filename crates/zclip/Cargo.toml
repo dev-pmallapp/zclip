@@ -1,0 +1,20 @@
+[package]
+name = "zclip"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description.workspace = true
+readme = "../../README.md"
+keywords = ["zellij", "plugin", "clipboard", "tmux", "wasm"]
+categories = ["command-line-utilities"]
+
+[lib]
+# cdylib -> `target/wasm32-wasip1/<profile>/zclip.wasm`, the artifact Zellij loads.
+# rlib   -> keeps the crate linkable for tooling and doc builds.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+zclip-core.workspace = true
+zellij-tile.workspace = true

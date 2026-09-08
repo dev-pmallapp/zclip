@@ -1,0 +1,16 @@
+// Development-only layout. Run `just build` first so that
+// target/wasm32-wasip1/debug/zclip.wasm exists. The plugin path below is
+// relative to the repo root, so Zellij must be started from there
+// (e.g. `just layout`).
+layout {
+    pane size=1 borderless=true {
+        plugin location="zellij:tab-bar"
+    }
+    pane
+    pane size="30%" {
+        plugin location="file:target/wasm32-wasip1/debug/zclip.wasm"
+    }
+    pane size=2 borderless=true {
+        plugin location="zellij:status-bar"
+    }
+}

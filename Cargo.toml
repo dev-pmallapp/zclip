@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/zclip", "crates/zclip-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+repository = "https://github.com/dev-pmallapp/zclip"
+description = "Zellij plugin implementing a tmux-like yank-buffer ring with optional system clipboard bridging"
+
+[workspace.dependencies]
+zclip-core = { path = "crates/zclip-core", version = "0.1.0" }
+# `zellij-tile` transitively pulls the whole of `zellij-utils`. On non-wasm
+# targets that drags in isahc -> curl -> openssl-sys, tokio, rusqlite and
+# friends. Keep this dependency confined to the `zclip` cdylib crate so that
+# `zclip-core` stays hermetic and testable without any system libraries.
+zellij-tile = "0.45"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

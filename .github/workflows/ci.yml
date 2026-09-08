@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # NB: deliberately no global `RUSTFLAGS: -D warnings`. RUSTFLAGS applies to
+  # dependencies too, so a warning anywhere in the zellij-utils tree would fail
+  # our build. Each clippy invocation passes `-D warnings` explicitly instead,
+  # which only denies warnings in our own crates.
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      # Only zclip-core is linted natively here; zclip (the cdylib) pulls in
+      # zellij-utils' native-only deps (openssl-sys/curl-sys/tokio/...) when
+      # built for the host target, so it is only ever clippy'd/built for
+      # wasm32-wasip1 (see build-wasm job).
+      - name: cargo clippy -p zclip-core
+        run: cargo clippy -p zclip-core --all-targets -- -D warnings
+
+  test:
+    name: native unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+
+      # zclip-core has zero dependencies and builds/tests natively in <1s.
+      # zclip depends on zellij-tile -> zellij-utils, which on a native
+      # (non-wasm) target transitively pulls in isahc -> curl -> curl-sys +
+      # openssl-sys, plus tokio/rusqlite/notify/log4rs/interprocess. Running
+      # `cargo test` against zclip (or a bare workspace `cargo test`) would
+      # require apt-installed libssl-dev/libcurl4-openssl-dev and make this
+      # job ~70x slower for no benefit, since zclip only ever runs as wasm.
+      # So we scope native tests to `-p zclip-core` only; zclip is exercised
+      # by the wasm build/clippy in the build-wasm job instead.
+      - name: cargo test -p zclip-core
+        run: cargo test -p zclip-core --all-targets
+
+  build-wasm:
+    name: wasm32-wasip1 build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-wasm
+
+      - name: cargo clippy --workspace (wasm32-wasip1)
+        run: cargo clippy --workspace --target wasm32-wasip1 --all-targets -- -D warnings
+
+      - name: cargo build --workspace --release (wasm32-wasip1)
+        run: cargo build --workspace --target wasm32-wasip1 --release
+
+      - name: verify wasm artifact exists
+        run: |
+          test -f target/wasm32-wasip1/release/zclip.wasm
+          ls -lh target/wasm32-wasip1/release/zclip.wasm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zclip-wasm
+          path: target/wasm32-wasip1/release/zclip.wasm

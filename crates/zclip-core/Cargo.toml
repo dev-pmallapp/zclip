@@ -1,0 +1,14 @@
+[package]
+name = "zclip-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-independent core logic for the zclip Zellij plugin"
+
+# Intentionally dependency-free. Everything in this crate must compile and test
+# on any target without system libraries, so that `cargo test -p zclip-core`
+# stays fast and hermetic. Anything needing the Zellij host API belongs in the
+# `zclip` crate instead.
+[dependencies]
