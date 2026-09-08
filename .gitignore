@@ -1,0 +1,11 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Python (roadmap tooling)
+__pycache__/
+*.py[cod]
+
+# Editor / OS
+.DS_Store
+*.swp
