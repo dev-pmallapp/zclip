@@ -11,13 +11,39 @@ that later features have a concrete place to live and so CI has something to
 build against.
 
 ## Acceptance criteria
-- [ ] `Cargo.toml` declares a `cdylib` crate depending on `zellij-tile = "0.45"`
+- [ ] A Cargo **workspace** with two members: `crates/zclip-core` and `crates/zclip`
+- [ ] `crates/zclip-core` has **zero dependencies** and holds all host-independent logic
+- [ ] `crates/zclip` declares `crate-type = ["cdylib", "rlib"]` and depends on `zellij-tile = "0.45"` and `zclip-core`
 - [ ] A `Zclip` struct derives `Default` and implements `ZellijPlugin`
 - [ ] `load`, `update`, `pipe`, and `render` are implemented as minimal stubs (render prints a placeholder string)
 - [ ] `register_plugin!(Zclip)` is called at the crate root
-- [ ] `cargo build --target wasm32-wasip1` succeeds and produces `target/wasm32-wasip1/debug/zclip.wasm`
+- [ ] `cargo build --workspace --target wasm32-wasip1` succeeds and produces `target/wasm32-wasip1/debug/zclip.wasm`
+- [ ] `cargo test -p zclip-core` passes with no system libraries installed
 - [ ] `rust-toolchain.toml` (or equivalent) pins the toolchain and the `wasm32-wasip1` target
 - [ ] `.gitignore` excludes `target/`
+
+## Why a workspace and not a single crate
+`zellij-tile` depends on `zellij-utils`, which is Zellij's *entire* shared library
+(client + server + CLI), not a slim data crate. Under
+`cfg(not(target_family = "wasm"))` it pulls in a mandatory, non-optional
+`isahc` -> `curl` -> `curl-sys` + `openssl-sys` chain, plus `tokio`, `rusqlite`,
+`notify`, `log4rs` and `interprocess`.
+
+Consequences measured on this repo:
+
+| build | needs libssl/libcurl | time |
+| --- | --- | --- |
+| `cargo test -p zclip-core` | no | ~0.9s |
+| native build of `crates/zclip` | **yes** | ~60-70s |
+| `cargo build --target wasm32-wasip1` | no | n/a |
+
+`cargo tree --target wasm32-wasip1 -p zclip | grep -c 'openssl|curl|tokio|rusqlite'`
+returns **0** — none of it is reachable on the real target. Splitting the crates
+confines `zellij-tile` to the cdylib, so the test loop stays hermetic and fast
+and CI needs no `apt install libssl-dev`.
+
+Rule that follows: **never run a bare `cargo test`/`cargo build`/`cargo clippy` at
+the workspace root.** Scope with `-p zclip-core` or `--target wasm32-wasip1`.
 
 ## Technical notes
 - Crate API reference: https://docs.rs/zellij-tile/latest/zellij_tile/
@@ -27,7 +53,8 @@ build against.
 - `update(&mut self, event: Event) -> bool` and `pipe(&mut self, pipe_message: PipeMessage) -> bool` should
   return `true` only when a re-render is required
 - Follow the crate layout used by https://github.com/zellij-org/rust-plugin-example as a structural reference
-- `Cargo.toml` should set `crate-type = ["cdylib"]`
+- `crates/zclip/Cargo.toml` should set `crate-type = ["cdylib", "rlib"]` (`rlib` keeps the crate linkable for tooling and doc builds)
+- The workspace target dir is at the repo root, so the artifact path is `target/wasm32-wasip1/<profile>/zclip.wasm`
 
 ## Out of scope
 - Permission requests and gating (separate issue)

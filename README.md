@@ -10,7 +10,10 @@
 
 ## Requirements
 
-- Zellij (developed against the 0.45 plugin API)
+- **Zellij 0.45 or newer.** This is a hard requirement, not a recommendation:
+  the compiled plugin advertises the `zellij-tile` API version it was built
+  against (currently 0.45.1), and older hosts reject the plugin outright rather
+  than loading it with reduced functionality. Zellij 0.44.x will not work.
 - Rust stable with the `wasm32-wasip1` target
 
 ## Install
