@@ -10,10 +10,16 @@ readme = "../../README.md"
 keywords = ["zellij", "plugin", "clipboard", "tmux", "wasm"]
 categories = ["command-line-utilities"]
 
-[lib]
-# cdylib -> `target/wasm32-wasip1/<profile>/zclip.wasm`, the artifact Zellij loads.
-# rlib   -> keeps the crate linkable for tooling and doc builds.
-crate-type = ["cdylib", "rlib"]
+# This is a BINARY crate, not a cdylib, despite producing a `.wasm` that gets
+# dynamically loaded. Zellij loads plugins as WASI *command* modules and calls
+# the module's entry point before invoking any export. A `cdylib` on
+# wasm32-wasip1 emits neither `_start` nor `_initialize`, so Zellij rejects it
+# with "could not find exported function" even though `load`/`render`/`update`
+# are all exported correctly. `register_plugin!` supplies `fn main()` for us,
+# which is why `main.rs` declares none.
+[[bin]]
+name = "zclip"
+path = "src/main.rs"
 
 [dependencies]
 zclip-core.workspace = true

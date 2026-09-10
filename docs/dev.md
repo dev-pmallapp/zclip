@@ -25,7 +25,10 @@ The workspace has two crates:
 - `crates/zclip-core` — pure Rust, zero dependencies, hermetic. All plugin
   logic should live here, with unit tests alongside it. It builds and tests
   natively in under a second.
-- `crates/zclip` — the `cdylib` Zellij plugin. It depends on `zellij-tile`,
+- `crates/zclip` — the Zellij plugin. A **binary** crate, not a `cdylib`:
+  Zellij loads plugins as WASI *command* modules and a `cdylib` emits no
+  `_start`, so the host rejects it with "could not find exported function".
+  It depends on `zellij-tile`,
   which transitively pulls in `zellij-utils` and (on non-wasm targets) a
   chain of isahc -> curl -> openssl-sys. This crate is host glue only: wire
   up Zellij's plugin API and delegate to `zclip-core`.

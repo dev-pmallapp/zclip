@@ -7,7 +7,7 @@ Thanks for your interest in contributing. Work is tracked in GitHub milestones M
 This is a Cargo workspace with two crates, split deliberately:
 
 - `crates/zclip-core` - pure Rust, **zero dependencies**. All logic lives here: the yank buffer, copy mode state machine, clipboard backend selection, everything. Tests run natively in under a second on any machine, with no system libraries required.
-- `crates/zclip` - the `cdylib` Zellij plugin, depends on `zellij-tile = "0.45"`. This crate is a thin host shim only: it wires `zclip-core` to the Zellij plugin API and should contain as little logic as possible.
+- `crates/zclip` - the Zellij plugin, a **binary** crate (not a `cdylib` - see its `Cargo.toml`), depends on `zellij-tile = "0.45"`. This crate is a thin host shim only: it wires `zclip-core` to the Zellij plugin API and should contain as little logic as possible.
 
 ### Why the split
 

@@ -14,7 +14,7 @@ description = "Zellij plugin implementing a tmux-like yank-buffer ring with opti
 zclip-core = { path = "crates/zclip-core", version = "0.1.0" }
 # `zellij-tile` transitively pulls the whole of `zellij-utils`. On non-wasm
 # targets that drags in isahc -> curl -> openssl-sys, tokio, rusqlite and
-# friends. Keep this dependency confined to the `zclip` cdylib crate so that
+# friends. Keep this dependency confined to the `zclip` plugin crate so that
 # `zclip-core` stays hermetic and testable without any system libraries.
 zellij-tile = "0.45"
 
