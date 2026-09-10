@@ -72,6 +72,13 @@ pub struct Zclip {
     /// Id of the most recent CLI pipe handled, so the trailing end-of-stream
     /// message of that same pipe does not re-run the command. See `pipe`.
     last_cli_pipe: Option<String>,
+    /// Which event delivered the most recent key, and what it was.
+    ///
+    /// Diagnostic. `Event::Key` and `Event::InterceptedKeyPress` are handled
+    /// identically, so without this there is no way to tell from the outside
+    /// whether `InterceptInput` is actually doing anything -- the fallback path
+    /// looks the same to a user. Shown in the copy-mode footer.
+    last_key_source: Option<(&'static str, String)>,
     /// Text-window height from the most recent render.
     ///
     /// Paging motions need the window size, but key events carry no geometry --
@@ -491,6 +498,10 @@ impl Zclip {
         if let Some(status) = &self.status {
             println!("  {status}");
         }
+        match &self.last_key_source {
+            Some((source, key)) => println!("  last key: {key} via {source}"),
+            None => println!("  last key: (none yet)"),
+        }
     }
 
     /// Renders the paste-buffer ring.
@@ -606,6 +617,7 @@ impl ZellijPlugin for Zclip {
                 // Zellij delivers a given press as one or the other, never
                 // both, so this cannot double-handle.
                 if self.copy_mode.is_active() {
+                    self.last_key_source = Some(("Event::Key", key.to_string()));
                     return self.handle_copy_mode_key(&key);
                 }
                 self.handle_key(&key)
@@ -616,6 +628,7 @@ impl ZellijPlugin for Zclip {
                     clear_key_presses_intercepts();
                     return false;
                 }
+                self.last_key_source = Some(("InterceptedKeyPress", key.to_string()));
                 self.handle_copy_mode_key(&key)
             }
             Event::BeforeClose => {
