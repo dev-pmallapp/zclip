@@ -29,6 +29,10 @@ use zellij_tile::prelude::*;
 ///   before the intercept is ever consulted, so those keypresses still act on
 ///   the binding and never arrive here. Only held while copy mode is active;
 ///   see `enter_copy_mode` / `exit_copy_mode`.
+/// - `ChangeApplicationState` — `replace_pane_with_existing_pane`, to swap
+///   zclip's own pane in for the pane being copied from on entering copy mode,
+///   and swap it back out again on exit. See `enter_copy_mode` /
+///   `exit_copy_mode`.
 ///
 /// Capabilities for later milestones are deliberately *not* requested, so users
 /// are not asked to approve something zclip cannot yet do:
@@ -39,6 +43,7 @@ const REQUIRED_PERMISSIONS: &[PermissionType] = &[
     PermissionType::ReadPaneContents,
     PermissionType::WriteToStdin,
     PermissionType::InterceptInput,
+    PermissionType::ChangeApplicationState,
 ];
 
 /// How many characters of a buffer to show per row in the list.
@@ -61,12 +66,21 @@ pub struct Zclip {
     permissions: PermissionState,
     /// The paste-buffer ring itself. All the interesting logic lives here.
     ring: BufferRing,
-    /// Our own pane id, used to exclude ourselves when hunting for the pane the
-    /// user actually cares about.
+    /// Our own pane id, used to swap ourselves into and out of the target
+    /// pane's slot via `replace_pane_with_existing_pane`. See
+    /// `enter_copy_mode` / `exit_copy_mode`.
     own_plugin_id: Option<u32>,
     /// The most recent *terminal* pane observed focused: both the yank source
     /// and the paste target. `None` until the first `PaneUpdate` arrives.
     target_pane: Option<PaneId>,
+    /// The pane zclip displaced to enter copy mode, if any.
+    ///
+    /// Recorded at swap-in time and consumed at swap-out time so exit
+    /// restores exactly the pane that was replaced -- `target_pane` is not
+    /// safe to use for this, since `PaneUpdate` keeps it pointed at whatever
+    /// terminal is currently focused, which may have moved on while copy mode
+    /// was active.
+    copy_mode_origin: Option<PaneId>,
     /// Result of the last action, shown in the UI so that a no-op (empty
     /// selection, no target pane) explains itself instead of looking broken.
     status: Option<String>,
@@ -194,26 +208,52 @@ impl Zclip {
         // captured by an invisible plugin.
         intercept_key_presses();
 
+        // Swap zclip's own pane into the target's exact slot -- same tab,
+        // same geometry -- rather than floating over it, so copy mode looks
+        // like tmux's in-place `copy-mode` instead of a popup. `true` tells
+        // the host to park the displaced pane in `suppressed_panes` rather
+        // than closing it; `exit_copy_mode` reverses this with the mirror
+        // call. If we somehow never learned our own plugin id, fall back to
+        // the old floating behaviour so copy mode is still usable rather than
+        // silently invisible.
+        match self.own_plugin_id {
+            Some(own_id) => {
+                replace_pane_with_existing_pane(pane_id, PaneId::Plugin(own_id), true);
+                self.copy_mode_origin = Some(pane_id);
+            }
+            None => show_self(true),
+        }
+
         self.status = Some(format!("copy mode — {lines} line(s) from {pane_label}"));
     }
 
-    /// Leaves copy mode and returns the plugin pane to hiding.
+    /// Leaves copy mode and undoes the pane swap made on entry.
     ///
     /// Releasing the keyboard is unconditional rather than gated on the state
     /// transition: if the intercept were ever set without the session (or vice
     /// versa) the safe direction to fail is "release".
     ///
-    /// Hiding again is not cosmetic. `enter_copy_mode` reveals this pane with
-    /// `show_self`, and a plugin pane left visible and focused is reported as
-    /// the focused pane on the next `PaneUpdate` -- which makes
-    /// `track_focused_pane` fall back to guessing a terminal, corrupting the
-    /// paste target. Staying hidden between invocations is also what makes
-    /// paste-from-any-pane work at all.
+    /// Restoring the original pane is not cosmetic. `enter_copy_mode` swaps
+    /// zclip's pane into the target's slot with `replace_pane_with_existing_pane`,
+    /// and a plugin pane left standing there and focused is reported as the
+    /// focused pane on the next `PaneUpdate` -- which makes `track_focused_pane`
+    /// fall back to guessing a terminal, corrupting the paste target. The
+    /// mirror call below puts the terminal back in its slot and re-suppresses
+    /// zclip in one move, which is also what makes paste-from-any-pane work at
+    /// all. If there is no recorded origin (`copy_mode_origin` was never set,
+    /// e.g. `enter_copy_mode` fell back to `show_self` for lack of an own
+    /// plugin id), fall back to plain `hide_self` -- this also covers the
+    /// buffer list, which is revealed by `show_self` rather than by a swap.
     fn exit_copy_mode(&mut self) {
         clear_key_presses_intercepts();
         if self.copy_mode.exit() {
             self.status = Some("left copy mode".into());
-            hide_self();
+            match (self.copy_mode_origin.take(), self.own_plugin_id) {
+                (Some(origin), Some(own_id)) => {
+                    replace_pane_with_existing_pane(PaneId::Plugin(own_id), origin, true);
+                }
+                _ => hide_self(),
+            }
         }
     }
 
@@ -665,6 +705,17 @@ impl ZellijPlugin for Zclip {
                 self.handle_copy_mode_key(&key)
             }
             Event::BeforeClose => {
+                // Safety valve, same spirit as the intercept release below: if
+                // zclip's pane is closed while it is standing in for a
+                // terminal (mid-copy-mode), that terminal is sitting in
+                // `suppressed_panes` and closing zclip without restoring it
+                // would strand the user without their pane. Swap it back
+                // first, before releasing the keyboard.
+                if let (Some(origin), Some(own_id)) =
+                    (self.copy_mode_origin.take(), self.own_plugin_id)
+                {
+                    replace_pane_with_existing_pane(PaneId::Plugin(own_id), origin, true);
+                }
                 // Safety valve: if the pane is closed while copy mode holds the
                 // keyboard, release it. Otherwise the intercept outlives the UI
                 // and the user is left typing into nothing.
@@ -727,23 +778,19 @@ impl ZellijPlugin for Zclip {
                 true
             }
             "copy_mode" => {
-                // Resolve the target BEFORE show_self: focusing ourselves makes
-                // the host report zclip as the focused pane, losing the very
-                // pane the user wants to copy from.
+                // Resolve the target BEFORE anything else: focusing ourselves
+                // (or swapping ourselves into a pane) makes the host report
+                // zclip as the focused pane, losing the very pane the user
+                // wants to copy from.
                 self.refresh_target_pane();
                 // Height is unknown until render, so enter with a provisional
                 // window; `render` reconciles it via scroll_to_cursor with the
-                // real pane height.
+                // real pane height. `enter_copy_mode` itself performs the
+                // swap into the target pane's slot on success, so there is
+                // nothing left to reveal here -- calling `show_self` as well
+                // would fight the swap by floating zclip on top of the pane
+                // it just took the place of.
                 self.enter_copy_mode(PROVISIONAL_HEIGHT);
-                // Reveal the pane ONLY on success. `enter_copy_mode` bails on
-                // three separate paths (no target pane, unreadable pane, empty
-                // scrollback), and showing ourselves first meant a user who
-                // asked for copy mode was instead handed the buffer list --
-                // reading "(empty) enter copy mode to capture text", which
-                // looks precisely like the plugin ignoring the keypress.
-                if self.copy_mode.is_active() {
-                    show_self(true);
-                }
                 true
             }
             "cancel" => {

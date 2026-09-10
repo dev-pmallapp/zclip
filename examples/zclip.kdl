@@ -35,39 +35,21 @@ keybinds {
         // and paste. Never put `launch_new` on a MessagePlugin action for a
         // stateful plugin like zclip; rely on `load_plugins` above instead.
 
-        // Enter copy mode: captures the scrollback of the pane you are in
-        // and opens zclip floating so you can navigate it.
+        // Enter copy mode: captures the scrollback of the pane you are in,
+        // then zclip swaps its own pane into that exact slot
+        // (`replace_pane_with_existing_pane`), so copy mode appears at the
+        // target's exact geometry, in the target's own tab -- no floating
+        // pane, no relocation needed. Exiting swaps the terminal back into
+        // its slot and re-suppresses zclip. That is why this binding is a
+        // single plain action rather than the LaunchOrFocusPlugin +
+        // MessagePlugin pair used below for `list`: there is no pane to bring
+        // into view here, zclip goes to the pane instead of the other way
+        // round.
         //
         // NB: tmux's `prefix [` is deliberately NOT reproduced literally.
         // In a terminal, Ctrl+[ *is* the Escape byte (0x1b), so binding it
         // would make Escape unusable. Alt-based bindings avoid that entirely.
-        //
-        // This binding fires two actions in sequence: LaunchOrFocusPlugin's
-        // `move_to_focused_tab` first relocates zclip's pane into whichever
-        // tab you are currently in (the resident instance's pane otherwise
-        // stays wherever it started), then MessagePlugin tells that same
-        // instance to enter copy mode. Plain MessagePlugin has no
-        // `move_to_focused_tab` equivalent, which is why this needs both
-        // actions rather than one.
-        //
-        // IMPORTANT: use the `zclip` ALIAS here, exactly as `load_plugins`
-        // above does. Do not substitute the full `file:` URL. Zellij matches
-        // a keybind's plugin against a running pane with
-        // `RunPluginOrAlias::is_equivalent_to_run` (zellij-utils
-        // src/input/layout.rs:191), which has arms for (Alias, Alias),
-        // (Alias, RunPlugin) and (RunPlugin, RunPlugin) -- but NOT for
-        // (RunPlugin, Alias), which falls through to `_ => false`. Naming the
-        // plugin by URL here while `load_plugins` names it by alias is that
-        // unhandled combination: LaunchOrFocusPlugin never finds the resident
-        // instance and spawns a new one on every keypress. Confusingly, the
-        // paste binding would keep working, because MessagePlugin routes on
-        // the RESOLVED (location, configuration) pair and is blind to the
-        // alias/URL distinction -- so the breakage looks like it is specific
-        // to copy mode.
-        bind "Alt y" {
-            LaunchOrFocusPlugin "zclip" { floating true; move_to_focused_tab true; };
-            MessagePlugin "zclip" { name "copy_mode"; };
-        }
+        bind "Alt y" { MessagePlugin "zclip" { name "copy_mode"; }; }
 
         // Leave copy mode. Escape also works from inside copy mode.
         //
