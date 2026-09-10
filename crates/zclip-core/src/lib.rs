@@ -13,9 +13,13 @@
 
 pub mod buffer;
 pub mod permissions;
+pub mod selection;
 
-pub use buffer::{BufferId, BufferLimitError, BufferRing, PasteBuffer, DEFAULT_BUFFER_LIMIT};
+pub use buffer::{
+    parse_buffer_limit, BufferId, BufferLimitError, BufferRing, PasteBuffer, DEFAULT_BUFFER_LIMIT,
+};
 pub use permissions::PermissionState;
+pub use selection::{extract_span, trim_trailing_blanks, Cursor};
 
 /// The version of the zclip core library, as reported to users and logs.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
