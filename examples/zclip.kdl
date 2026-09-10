@@ -1,0 +1,46 @@
+// zclip — example Zellij configuration.
+//
+// Merge these blocks into ~/.config/zellij/config.kdl. Adjust the plugin path
+// to wherever you installed zclip.wasm.
+
+plugins {
+    // A plugin alias, so keybindings can say "zclip" instead of repeating the
+    // full path. Load zclip in the background at startup so paste works from
+    // any pane without you having opened its UI first.
+    zclip location="file:~/.config/zellij/plugins/zclip.wasm" {
+        // Maximum number of *unnamed* buffers kept. Named buffers are pinned
+        // and never count toward this limit, matching tmux's buffer-limit.
+        buffer_limit "50"
+    }
+}
+
+load_plugins {
+    // Start zclip hidden at session start. Without this, the paste binding has
+    // to launch the plugin on first use (launch_new), which works but adds a
+    // noticeable delay to the very first paste.
+    zclip
+}
+
+keybinds {
+    normal {
+        // Enter copy mode: opens zclip floating over the pane you were in.
+        //
+        // NB: tmux's `prefix [` is deliberately NOT reproduced literally.
+        // In a terminal, Ctrl+[ *is* the Escape byte (0x1b), so binding it
+        // would make Escape unusable. Alt-based bindings avoid that entirely.
+        bind "Alt y" { LaunchOrFocusPlugin "zclip" { floating true; }; }
+
+        // Paste the most recent buffer into the pane you are currently in.
+        // This is the tmux `prefix ]` equivalent. It works from any pane
+        // because MessagePlugin reaches zclip even while it is unfocused or
+        // hidden -- you do not have to focus the plugin to paste.
+        bind "Alt p" { MessagePlugin "zclip" { name "paste"; launch_new true; }; }
+
+        // Paste a specific buffer, by name or by index (0 = most recent).
+        // `payload` is the selector; a name always wins over an index.
+        bind "Alt P" { MessagePlugin "zclip" { name "paste"; payload "1"; launch_new true; }; }
+
+        // Show the buffer browser.
+        bind "Alt b" { MessagePlugin "zclip" { name "list"; floating true; launch_new true; }; }
+    }
+}

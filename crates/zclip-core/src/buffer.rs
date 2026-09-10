@@ -450,6 +450,32 @@ impl BufferRing {
             .find(|b| b.name.as_deref() == Some(name))
     }
 
+    /// Resolves a user-supplied buffer selector, as passed to `paste-buffer`.
+    ///
+    /// Tries `selector` as a buffer **name** first, then as a positional index
+    /// (`0` = most recent). Names deliberately win on collision: a user who
+    /// went to the trouble of naming a buffer `2` means *that* buffer, not
+    /// whatever currently sits at position 2. Positional indices shift on every
+    /// yank, so treating them as the fallback keeps the stable interpretation
+    /// as the primary one.
+    ///
+    /// Returns `None` for an empty selector, an unknown name, or an index past
+    /// the end of the ring.
+    #[must_use]
+    pub fn resolve(&self, selector: &str) -> Option<&PasteBuffer> {
+        let selector = selector.trim();
+        if selector.is_empty() {
+            return None;
+        }
+        if let Some(buffer) = self.get_by_name(selector) {
+            return Some(buffer);
+        }
+        selector
+            .parse::<usize>()
+            .ok()
+            .and_then(|index| self.get(index))
+    }
+
     /// Removes and returns the buffer with the given `id`, if present.
     ///
     /// This works regardless of whether the buffer is named, since it is an
@@ -885,6 +911,59 @@ mod tests {
         ring.push("line one\nline two\n");
 
         assert_eq!(ring.get(0).unwrap().line_count(), 2);
+    }
+
+    #[test]
+    fn resolve_matches_a_buffer_name() {
+        let mut ring = BufferRing::new(5);
+        ring.push_named("pinned text", "notes");
+        ring.push("other");
+
+        assert_eq!(ring.resolve("notes").unwrap().text(), "pinned text");
+    }
+
+    #[test]
+    fn resolve_falls_back_to_a_positional_index() {
+        let mut ring = BufferRing::new(5);
+        ring.push("oldest");
+        ring.push("newest");
+
+        assert_eq!(ring.resolve("0").unwrap().text(), "newest");
+        assert_eq!(ring.resolve("1").unwrap().text(), "oldest");
+    }
+
+    #[test]
+    fn resolve_prefers_a_name_over_a_colliding_index() {
+        let mut ring = BufferRing::new(5);
+        ring.push("position one");
+        // Deliberately name a buffer "1" while another buffer sits at index 1.
+        ring.push_named("named one", "1");
+
+        assert_eq!(
+            ring.resolve("1").unwrap().text(),
+            "named one",
+            "an explicit name must win over a positional index"
+        );
+    }
+
+    #[test]
+    fn resolve_trims_whitespace() {
+        let mut ring = BufferRing::new(5);
+        ring.push_named("text", "notes");
+
+        assert!(ring.resolve("  notes  ").is_some());
+    }
+
+    #[test]
+    fn resolve_rejects_empty_unknown_and_out_of_range_selectors() {
+        let mut ring = BufferRing::new(5);
+        ring.push("only");
+
+        assert!(ring.resolve("").is_none());
+        assert!(ring.resolve("   ").is_none());
+        assert!(ring.resolve("nosuchname").is_none());
+        assert!(ring.resolve("7").is_none());
+        assert!(ring.resolve("-1").is_none());
     }
 
     #[test]

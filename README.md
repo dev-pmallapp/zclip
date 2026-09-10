@@ -29,21 +29,35 @@ A downloadable `zclip.wasm` release artifact is planned for v0.1.0 (M6).
 
 ## Configuration
 
-No configuration options exist yet (they arrive in M5). For now, load the plugin and bind a key to launch it:
+See [`examples/zclip.kdl`](examples/zclip.kdl) for a complete, commented example.
+The essentials:
 
 ```kdl
 plugins {
-    zclip location="file:~/.config/zellij/plugins/zclip.wasm"
+    zclip location="file:~/.config/zellij/plugins/zclip.wasm" {
+        buffer_limit "50"
+    }
+}
+
+load_plugins {
+    zclip          // run in the background so paste works from any pane
 }
 
 keybinds {
     normal {
-        bind "Ctrl y" {
-            LaunchOrFocusPlugin "zclip" { floating true; }
-        }
+        bind "Alt y" { LaunchOrFocusPlugin "zclip" { floating true; }; }
+        bind "Alt p" { MessagePlugin "zclip" { name "paste"; launch_new true; }; }
+        bind "Alt b" { MessagePlugin "zclip" { name "list"; floating true; launch_new true; }; }
     }
 }
 ```
+
+`Alt p` pastes into whichever pane you are currently in - you do not need to
+focus zclip first. `buffer_limit` bounds *unnamed* buffers only; named buffers
+are pinned and never evicted, as in tmux.
+
+tmux's `prefix [` is not reproduced literally: in a terminal `Ctrl+[` *is* the
+Escape byte, so binding it would break Escape.
 
 ## Roadmap
 

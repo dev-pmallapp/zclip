@@ -126,22 +126,55 @@ impl Zclip {
         }
     }
 
-    /// Writes the most recent buffer into the target pane.
-    fn paste(&mut self) {
-        let Some(pane_id) = self.target_pane else {
-            self.status = Some("no terminal pane seen yet — focus one first".into());
+    /// The pane a paste should land in.
+    ///
+    /// Asks the host for the live focus first, because paste is normally
+    /// triggered by a keybinding while the user is in a terminal pane and zclip
+    /// is unfocused or hidden — in that situation the host's answer is the
+    /// correct one. Falls back to the pane last seen focused via `PaneUpdate`,
+    /// which covers the case where zclip itself holds focus (its own pane would
+    /// otherwise be returned, and pasting into ourselves is never useful).
+    fn paste_target(&self) -> Option<PaneId> {
+        if let Ok((_tab, pane_id)) = get_focused_pane_info() {
+            if matches!(pane_id, PaneId::Terminal(_)) {
+                return Some(pane_id);
+            }
+        }
+        self.target_pane
+    }
+
+    /// Writes a buffer into the focused terminal pane.
+    ///
+    /// `selector` is an optional buffer name or index; `None` means most
+    /// recent, matching tmux's bare `paste-buffer`.
+    fn paste(&mut self, selector: Option<&str>) {
+        let Some(pane_id) = self.paste_target() else {
+            self.status = Some("no terminal pane to paste into".into());
             return;
         };
-        let Some(buffer) = self.ring.most_recent() else {
-            self.status = Some("ring is empty — nothing to paste".into());
-            return;
+
+        let text = match selector {
+            Some(selector) => match self.ring.resolve(selector) {
+                Some(buffer) => buffer.text().to_string(),
+                None => {
+                    self.status = Some(format!("no buffer matching '{selector}'"));
+                    return;
+                }
+            },
+            None => match self.ring.most_recent() {
+                Some(buffer) => buffer.text().to_string(),
+                None => {
+                    self.status = Some("ring is empty — nothing to paste".into());
+                    return;
+                }
+            },
         };
 
         // Fire-and-forget: the host returns nothing, so a pane that has since
         // closed is silently dropped by Zellij rather than surfacing an error.
         // That is what makes pasting into a dead pane graceful instead of fatal.
-        write_chars_to_pane_id(buffer.text(), pane_id);
-        self.status = Some(format!("pasted {} bytes", buffer.text().len()));
+        write_chars_to_pane_id(&text, pane_id);
+        self.status = Some(format!("pasted {} bytes", text.len()));
     }
 
     /// Routes a keypress. Only plain, unmodified keys are handled for now.
@@ -152,10 +185,6 @@ impl Zclip {
         match key.bare_key {
             BareKey::Char('y') => {
                 self.yank();
-                true
-            }
-            BareKey::Char('p') => {
-                self.paste();
                 true
             }
             BareKey::Char('d') => {
@@ -221,10 +250,60 @@ impl ZellijPlugin for Zclip {
         }
     }
 
-    fn pipe(&mut self, _pipe_message: PipeMessage) -> bool {
-        // Driving zclip over `zellij pipe` is M5 and needs the ReadCliPipes
-        // permission, which is not requested yet.
-        false
+    fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
+        // Keybinding-driven commands arrive here, not through `Event::Key`:
+        // `MessagePlugin` in a keybind becomes `Action::KeybindPipe` and is
+        // delivered as a pipe with `PipeSource::Keybind`. That is what lets a
+        // keybinding reach zclip while a *terminal* pane keeps focus, which is
+        // the whole point — paste has to land in the pane you are working in.
+        //
+        // CLI-originated pipes (`zellij pipe`) are M5 (#36) and additionally
+        // need the ReadCliPipes permission.
+        if !self.ready() {
+            return false;
+        }
+
+        // A CLI pipe delivers a trailing message with `payload: None` to signal
+        // end-of-stream, so `zellij pipe --name paste` arrives *twice* and a
+        // naive handler pastes twice. A keybind pipe, by contrast, legitimately
+        // carries no payload ("just paste the most recent buffer"), so the
+        // absence of a payload can only be interpreted alongside the source.
+        let is_end_of_stream =
+            matches!(pipe_message.source, PipeSource::Cli(_)) && pipe_message.payload.is_none();
+        if is_end_of_stream {
+            return false;
+        }
+
+        let payload = pipe_message.payload.as_deref().map(str::trim);
+        let selector = payload.filter(|p| !p.is_empty());
+
+        match pipe_message.name.as_str() {
+            "yank" => {
+                // Stores the payload verbatim. Distinct from the `y` key path,
+                // which captures a selection from a pane; this is the
+                // scriptable entry point ("pipe some text straight into the
+                // ring") and is what makes the pipe surface testable without a
+                // mouse selection.
+                match selector.and_then(|text| self.ring.push(text)) {
+                    Some(_) => self.status = Some(format!("yanked ({} in ring)", self.ring.len())),
+                    None => self.status = Some("nothing to yank — empty payload".into()),
+                }
+                true
+            }
+            "paste" => {
+                self.paste(selector);
+                true
+            }
+            "list" => {
+                // Summon the UI. `true` floats it if it was hidden.
+                show_self(true);
+                true
+            }
+            other => {
+                self.status = Some(format!("unknown command '{other}'"));
+                true
+            }
+        }
     }
 
     fn render(&mut self, rows: usize, _cols: usize) {
@@ -259,7 +338,11 @@ impl ZellijPlugin for Zclip {
         if let Some(status) = &self.status {
             println!("  {status}");
         }
-        println!("  y yank   p paste   d delete");
+        // Paste is intentionally absent: it is driven by a keybinding from
+        // whatever pane you are in, not from here. `y` remains the only yank
+        // path until copy mode (#16/#17/#18) replaces it with a keyboard
+        // selection; it still requires a mouse selection in the target pane.
+        println!("  y yank (mouse selection)   d delete");
     }
 }
 
