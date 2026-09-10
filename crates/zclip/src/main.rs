@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use zclip_core::{
     apply_motion, parse_buffer_limit, BufferRing, CopyMode, Cursor, Motion, PermissionState,
-    Scrollback, DEFAULT_BUFFER_LIMIT,
+    Scrollback, SelectionMode, DEFAULT_BUFFER_LIMIT,
 };
 use zellij_tile::prelude::*;
 
@@ -96,14 +96,30 @@ impl Zclip {
     /// with the zclip pane itself no terminal pane is focused, and forgetting
     /// the target at that exact moment would make yank and paste unusable.
     fn track_focused_pane(&mut self, manifest: &PaneManifest) {
-        let focused = manifest
-            .panes
-            .values()
-            .flatten()
-            .find(|pane| pane.is_focused && !pane.is_plugin && !pane.exited);
+        // `PaneInfo::is_focused` is per-*tab*: every tab reports its own
+        // focused pane, so scanning the whole manifest finds several at once
+        // and picking the first is a coin toss over `HashMap` iteration order.
+        // Ask the host which tab the client is actually in before believing
+        // any of them.
+        let Ok((focused_tab, focused_pane)) = get_focused_pane_info() else {
+            return;
+        };
 
-        if let Some(pane) = focused {
-            self.target_pane = Some(PaneId::Terminal(pane.id));
+        // A terminal is focused: that is the answer, no search needed.
+        if matches!(focused_pane, PaneId::Terminal(_)) {
+            self.target_pane = Some(focused_pane);
+            return;
+        }
+
+        // Otherwise the user is in a plugin (very likely us). Fall back to the
+        // focused terminal *of that same tab*, so we remember where they were.
+        if let Some(panes) = manifest.panes.get(&focused_tab) {
+            if let Some(pane) = panes
+                .iter()
+                .find(|pane| pane.is_focused && !pane.is_plugin && !pane.exited)
+            {
+                self.target_pane = Some(PaneId::Terminal(pane.id));
+            }
         }
     }
 
@@ -213,13 +229,91 @@ impl Zclip {
         Some(motion)
     }
 
+    /// Yanks the current selection into the ring and leaves copy mode.
+    ///
+    /// Yanking with no active selection is a no-op with an explanation rather
+    /// than silently exiting, which would look like the keypress was lost.
+    fn yank_selection(&mut self) {
+        let Some(session) = self.copy_mode.session() else {
+            return;
+        };
+        let Some(text) = session.selected_text() else {
+            self.status = Some("nothing selected — press v, V or Ctrl-v first".into());
+            return;
+        };
+
+        // Terminal grids pad rows out to the pane width, so a captured
+        // selection carries meaningless trailing spaces on every line.
+        let text = zclip_core::trim_trailing_blanks(&text);
+        let lines = text.lines().count();
+
+        // The ring rejects blank text, so selecting only padding yanks nothing.
+        match self.ring.push(text) {
+            Some(_) => {
+                self.exit_copy_mode();
+                self.status = Some(format!(
+                    "yanked {lines} line(s) — {} in ring",
+                    self.ring.len()
+                ));
+            }
+            None => self.status = Some("selection was blank — nothing yanked".into()),
+        }
+    }
+
     /// Handles a key while copy mode owns the keyboard.
     fn handle_copy_mode_key(&mut self, key: &KeyWithModifier) -> bool {
+        let ctrl = key.key_modifiers.contains(&KeyModifier::Ctrl);
+
         // While intercepting we receive *every* key, including whatever the
         // user bound to the `cancel` pipe command -- Zellij never sees it to
         // act on it. So copy mode has to recognise its own exit key.
         if key.bare_key == BareKey::Esc {
-            self.exit_copy_mode();
+            // Escape backs out one level at a time, as in vi: it drops an
+            // active selection first and only leaves copy mode once there is
+            // nothing left to cancel. Exiting outright would discard a
+            // painstakingly made selection on a single mis-keypress.
+            let had_selection = self
+                .copy_mode
+                .session()
+                .is_some_and(zclip_core::CopySession::has_selection);
+            if had_selection {
+                if let Some(session) = self.copy_mode.session_mut() {
+                    session.clear_selection();
+                }
+                self.status = Some("selection cleared".into());
+            } else {
+                self.exit_copy_mode();
+            }
+            return true;
+        }
+
+        // Selection shape. `Ctrl-v` is checked before the motion table so it
+        // is not read as the `v` character.
+        let selection_mode = match (&key.bare_key, ctrl) {
+            (BareKey::Char('v'), true) => Some(SelectionMode::Block),
+            (BareKey::Char('v'), false) => Some(SelectionMode::Char),
+            (BareKey::Char('V'), false) => Some(SelectionMode::Line),
+            _ => None,
+        };
+        if let Some(mode) = selection_mode {
+            if let Some(session) = self.copy_mode.session_mut() {
+                // Pressing the same shape twice cancels, as in vi.
+                session.toggle_selection(mode);
+                self.status = Some(if session.has_selection() {
+                    match mode {
+                        SelectionMode::Char => "char selection".into(),
+                        SelectionMode::Line => "line selection".into(),
+                        SelectionMode::Block => "block selection".into(),
+                    }
+                } else {
+                    String::from("selection cleared")
+                });
+            }
+            return true;
+        }
+
+        if !ctrl && key.bare_key == BareKey::Char('y') {
+            self.yank_selection();
             return true;
         }
 
@@ -283,6 +377,18 @@ impl Zclip {
                 self.status = Some(format!("yanked ({count} in ring)"));
             }
             None => self.status = Some("selection was empty — nothing yanked".into()),
+        }
+    }
+
+    /// Records the focused terminal pane, asking the host directly.
+    ///
+    /// Used on paths that are about to steal focus, where waiting for the next
+    /// `PaneUpdate` would be too late.
+    fn refresh_target_pane(&mut self) {
+        if let Ok((_tab, pane_id)) = get_focused_pane_info() {
+            if matches!(pane_id, PaneId::Terminal(_)) {
+                self.target_pane = Some(pane_id);
+            }
         }
     }
 
@@ -362,13 +468,24 @@ impl Zclip {
             total
         );
 
-        for (row, line) in session.visible_rows(height) {
-            let marker = if row == cursor_row { '>' } else { ' ' };
+        // Collect first: `visible_rows` borrows the session, and the highlight
+        // lookup needs to borrow it again per row.
+        let width = cols.saturating_sub(2);
+        let visible: Vec<(usize, String)> = session
+            .visible_rows(height)
             // Truncate on char boundaries; terminal columns are characters,
             // and byte-slicing here would panic on any multi-byte line.
-            let width = cols.saturating_sub(2);
-            let text: String = line.chars().take(width).collect();
-            println!("{marker} {text}");
+            .map(|(row, line)| (row, line.chars().take(width).collect()))
+            .collect();
+
+        for (row, text) in visible {
+            let marker = if row == cursor_row { '>' } else { ' ' };
+            match session.selected_columns_for_row(row) {
+                Some((start, end)) => {
+                    println!("{marker} {}", highlight(&text, start, end));
+                }
+                None => println!("{marker} {text}"),
+            }
         }
 
         if let Some(status) = &self.status {
@@ -564,6 +681,10 @@ impl ZellijPlugin for Zclip {
                 true
             }
             "copy_mode" => {
+                // Resolve the target BEFORE show_self: focusing ourselves makes
+                // the host report zclip as the focused pane, losing the very
+                // pane the user wants to copy from.
+                self.refresh_target_pane();
                 // Height is unknown until render, so enter with a provisional
                 // window; `render` reconciles it via scroll_to_cursor with the
                 // real pane height.
@@ -605,6 +726,28 @@ impl ZellijPlugin for Zclip {
             self.render_buffer_list(rows);
         }
     }
+}
+
+/// Wraps the inclusive character range `start..=end` of `line` in reverse video.
+///
+/// Works in characters rather than bytes: the columns come from the selection
+/// model, which counts characters, and byte-slicing here would both mis-highlight
+/// and panic on multi-byte input. Ranges beyond the end of the line are clamped,
+/// which happens routinely in block selection over ragged lines.
+fn highlight(line: &str, start: usize, end: usize) -> String {
+    const REVERSE: &str = "\u{1b}[7m";
+    const RESET: &str = "\u{1b}[0m";
+
+    let chars: Vec<char> = line.chars().collect();
+    if chars.is_empty() || start >= chars.len() {
+        return line.to_string();
+    }
+    let end = end.min(chars.len() - 1);
+
+    let before: String = chars[..start].iter().collect();
+    let selected: String = chars[start..=end].iter().collect();
+    let after: String = chars[end + 1..].iter().collect();
+    format!("{before}{REVERSE}{selected}{RESET}{after}")
 }
 
 register_plugin!(Zclip);

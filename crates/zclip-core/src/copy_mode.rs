@@ -1,13 +1,21 @@
-//! The tmux-style copy-mode state machine: lifecycle and the scroll viewport.
+//! The tmux-style copy-mode state machine: lifecycle, the scroll viewport,
+//! and the current selection.
 //!
-//! **Cursor motions and text selection are explicitly out of scope here** —
-//! those are separate, later pieces of work. This module owns only two
-//! things: whether copy mode is active at all, and, while it is, which
-//! window of the captured [`Scrollback`] is currently visible on screen. A
-//! future motion layer will call [`CopySession::set_cursor`] to move the
-//! cursor around; this module guarantees that doing so always keeps the
-//! viewport and the cursor's position consistent with each other.
+//! **Cursor motion itself is explicitly out of scope here** — computing
+//! *where* the cursor should land for a given vi motion lives in
+//! [`crate::motion`], and callers reach this module's cursor through
+//! [`CopySession::set_cursor`]. This module guarantees that moving the
+//! cursor always keeps the viewport, the cursor's position, and any active
+//! selection consistent with each other.
+//!
+//! It does, however, own the selection's *shape and anchor*: whether a
+//! selection is active, which of tmux's char/line/block shapes
+//! ([`SelectionMode`]) it uses, and where it was started. Turning that
+//! anchor-plus-cursor pair into actual text or a highlighted column range is
+//! [`crate::region`]'s job; this module just tracks the state and delegates
+//! to it.
 
+use crate::region::{self, SelectionMode};
 use crate::scrollback::Scrollback;
 use crate::selection::Cursor;
 
@@ -105,6 +113,8 @@ pub struct CopySession {
     scrollback: Scrollback,
     cursor: Cursor,
     top: usize,
+    selection_anchor: Option<Cursor>,
+    selection_mode: SelectionMode,
 }
 
 impl CopySession {
@@ -117,6 +127,10 @@ impl CopySession {
     /// captured; starting the cursor anywhere else would put it somewhere
     /// the user never asked to look at. `top` is then chosen so that
     /// starting position is immediately visible.
+    ///
+    /// There is no selection yet: entering copy mode is not the same as
+    /// starting to select, and a fresh session should never appear to have
+    /// text highlighted before the user has asked for any.
     #[must_use]
     pub fn new(scrollback: Scrollback, height: usize) -> Self {
         let start_row = scrollback.viewport_start();
@@ -125,6 +139,8 @@ impl CopySession {
             scrollback,
             cursor,
             top: 0,
+            selection_anchor: None,
+            selection_mode: SelectionMode::Char,
         };
         session.scroll_to_cursor(height);
         session
@@ -226,6 +242,111 @@ impl CopySession {
             return None;
         }
         Some(self.cursor.row - self.top)
+    }
+
+    /// Starts a new selection, anchored at the cursor's **current**
+    /// position, using `mode` as its shape.
+    ///
+    /// The anchor is captured now, in the same absolute row space as the
+    /// cursor (see [`crate::region`]'s module docs on why that matters), so
+    /// it stays meaningful even as the viewport scrolls or the cursor moves
+    /// on afterward. This is the `v` / `V` / `Ctrl-v` entry point: whatever
+    /// selection existed before is discarded and replaced.
+    pub fn start_selection(&mut self, mode: SelectionMode) {
+        self.selection_anchor = Some(self.cursor);
+        self.selection_mode = mode;
+    }
+
+    /// Changes the active selection's shape to `mode` **without** moving
+    /// its anchor.
+    ///
+    /// If no selection is active yet, this starts one at the cursor instead
+    /// (matching [`Self::start_selection`]), so a caller never needs to
+    /// check [`Self::has_selection`] first just to switch shapes. This is
+    /// what makes pressing `v` then `V` behave like vi: the first press
+    /// starts a char-wise selection, the second switches it to line-wise in
+    /// place, keeping wherever the user first started selecting from.
+    pub fn set_selection_mode(&mut self, mode: SelectionMode) {
+        if self.selection_anchor.is_none() {
+            self.selection_anchor = Some(self.cursor);
+        }
+        self.selection_mode = mode;
+    }
+
+    /// Toggles a selection in `mode`: if a selection is already active in
+    /// that **same** mode, it is cleared; otherwise a selection in `mode`
+    /// is started (or switched to) at the cursor's current position.
+    ///
+    /// This models vi's `v` (or `V`, or `Ctrl-v`) pressed twice in a row
+    /// cancelling the selection it just started, while pressing a
+    /// *different* selection key switches shape instead of cancelling —
+    /// the same distinction [`Self::set_selection_mode`] draws.
+    pub fn toggle_selection(&mut self, mode: SelectionMode) {
+        if self.selection_anchor.is_some() && self.selection_mode == mode {
+            self.clear_selection();
+        } else {
+            self.start_selection(mode);
+        }
+    }
+
+    /// Clears the active selection, if any.
+    pub fn clear_selection(&mut self) {
+        self.selection_anchor = None;
+    }
+
+    /// The selection's anchor point, or `None` if no selection is active.
+    ///
+    /// Like the cursor, this is an absolute row/col position into
+    /// [`Self::scrollback`], not a position relative to the current
+    /// viewport.
+    #[must_use]
+    pub fn selection_anchor(&self) -> Option<Cursor> {
+        self.selection_anchor
+    }
+
+    /// The active selection's shape.
+    ///
+    /// This is meaningful even with no selection active (it simply reports
+    /// whatever shape the next selection would start in), so callers can
+    /// always read it without matching on [`Self::has_selection`] first.
+    #[must_use]
+    pub fn selection_mode(&self) -> SelectionMode {
+        self.selection_mode
+    }
+
+    /// Whether a selection is currently active.
+    #[must_use]
+    pub fn has_selection(&self) -> bool {
+        self.selection_anchor.is_some()
+    }
+
+    /// The text currently selected, or `None` if no selection is active.
+    ///
+    /// Delegates to [`region::extract_region`] over this session's own
+    /// scrollback, anchor, and cursor, so this is always exactly what
+    /// [`Self::selected_columns_for_row`] highlights.
+    #[must_use]
+    pub fn selected_text(&self) -> Option<String> {
+        let anchor = self.selection_anchor?;
+        Some(region::extract_region(
+            &self.scrollback,
+            anchor,
+            self.cursor,
+            self.selection_mode,
+        ))
+    }
+
+    /// The inclusive `(start_col, end_col)` range of `row` that is
+    /// currently selected, or `None` if no selection is active or `row`
+    /// falls outside it.
+    ///
+    /// Delegates to [`region::selected_columns`], using this session's own
+    /// scrollback to look up `row`'s character width.
+    #[must_use]
+    pub fn selected_columns_for_row(&self, row: usize) -> Option<(usize, usize)> {
+        let anchor = self.selection_anchor?;
+        let width = self.scrollback.line_width(row);
+        region::selected_columns(row, anchor, self.cursor, self.selection_mode, width)
     }
 }
 
@@ -452,5 +573,145 @@ mod tests {
         assert_eq!(session.cursor(), Cursor::new(0, 0));
         assert_eq!(session.visible_rows(10).count(), 0);
         assert_eq!(session.cursor_screen_row(10), Some(0));
+    }
+
+    #[test]
+    fn start_selection_anchors_at_the_current_cursor_position() {
+        let scrollback = Scrollback::from_parts(vec![], strings(&["hello world"]), vec![]);
+        let mut session = CopySession::new(scrollback, 10);
+        session.set_cursor(Cursor::new(0, 3));
+
+        session.start_selection(SelectionMode::Char);
+
+        assert_eq!(session.selection_anchor(), Some(Cursor::new(0, 3)));
+        assert!(session.has_selection());
+    }
+
+    #[test]
+    fn moving_the_cursor_after_starting_a_selection_extends_the_selected_text() {
+        let scrollback = Scrollback::from_parts(vec![], strings(&["hello world"]), vec![]);
+        let mut session = CopySession::new(scrollback, 10);
+        session.set_cursor(Cursor::new(0, 0));
+        session.start_selection(SelectionMode::Char);
+
+        let before = session.selected_text();
+        session.set_cursor(Cursor::new(0, 4));
+        let after = session.selected_text();
+
+        assert_eq!(before, Some("h".to_string()));
+        assert_eq!(after, Some("hello".to_string()));
+    }
+
+    #[test]
+    fn toggle_selection_with_the_same_mode_clears_it() {
+        let scrollback = Scrollback::from_parts(vec![], strings(&["hello world"]), vec![]);
+        let mut session = CopySession::new(scrollback, 10);
+        session.toggle_selection(SelectionMode::Char);
+        assert!(session.has_selection());
+
+        session.toggle_selection(SelectionMode::Char);
+
+        assert!(!session.has_selection());
+        assert_eq!(session.selected_text(), None);
+    }
+
+    #[test]
+    fn toggle_selection_with_a_different_mode_switches_and_keeps_the_anchor() {
+        let scrollback = Scrollback::from_parts(vec![], strings(&["hello world"]), vec![]);
+        let mut session = CopySession::new(scrollback, 10);
+        session.set_cursor(Cursor::new(0, 2));
+        session.toggle_selection(SelectionMode::Char);
+        let anchor = session.selection_anchor();
+
+        session.toggle_selection(SelectionMode::Line);
+
+        assert!(session.has_selection());
+        assert_eq!(session.selection_mode(), SelectionMode::Line);
+        assert_eq!(
+            session.selection_anchor(),
+            anchor,
+            "switching mode must not move the anchor"
+        );
+    }
+
+    #[test]
+    fn set_selection_mode_preserves_the_anchor() {
+        let scrollback = Scrollback::from_parts(vec![], strings(&["hello world"]), vec![]);
+        let mut session = CopySession::new(scrollback, 10);
+        session.set_cursor(Cursor::new(0, 5));
+        session.start_selection(SelectionMode::Char);
+        let anchor = session.selection_anchor();
+
+        session.set_selection_mode(SelectionMode::Block);
+
+        assert_eq!(session.selection_mode(), SelectionMode::Block);
+        assert_eq!(session.selection_anchor(), anchor);
+    }
+
+    #[test]
+    fn set_selection_mode_with_no_active_selection_starts_one_at_the_cursor() {
+        let scrollback = Scrollback::from_parts(vec![], strings(&["hello world"]), vec![]);
+        let mut session = CopySession::new(scrollback, 10);
+        session.set_cursor(Cursor::new(0, 6));
+        assert!(!session.has_selection());
+
+        session.set_selection_mode(SelectionMode::Line);
+
+        assert!(session.has_selection());
+        assert_eq!(session.selection_anchor(), Some(Cursor::new(0, 6)));
+        assert_eq!(session.selection_mode(), SelectionMode::Line);
+    }
+
+    #[test]
+    fn clear_selection_makes_selected_text_none() {
+        let scrollback = Scrollback::from_parts(vec![], strings(&["hello world"]), vec![]);
+        let mut session = CopySession::new(scrollback, 10);
+        session.start_selection(SelectionMode::Char);
+        assert!(session.selected_text().is_some());
+
+        session.clear_selection();
+
+        assert_eq!(session.selected_text(), None);
+        assert!(!session.has_selection());
+    }
+
+    #[test]
+    fn re_entering_copy_mode_drops_any_previous_selection() {
+        let mut mode = CopyMode::default();
+        mode.enter(
+            Scrollback::from_parts(vec![], strings(&["first", "session"]), vec![]),
+            10,
+        );
+        mode.session_mut()
+            .unwrap()
+            .start_selection(SelectionMode::Line);
+        assert!(mode.session().unwrap().has_selection());
+
+        mode.enter(
+            Scrollback::from_parts(vec![], strings(&["second", "session"]), vec![]),
+            10,
+        );
+
+        assert!(!mode.session().unwrap().has_selection());
+        assert_eq!(mode.session().unwrap().selected_text(), None);
+    }
+
+    #[test]
+    fn selected_text_is_none_with_no_active_selection() {
+        let scrollback = Scrollback::from_parts(vec![], strings(&["hello world"]), vec![]);
+        let session = CopySession::new(scrollback, 10);
+
+        assert_eq!(session.selected_text(), None);
+    }
+
+    #[test]
+    fn selected_columns_for_row_returns_none_outside_the_selection() {
+        let scrollback = Scrollback::from_parts(vec![], strings(&["one", "two", "three"]), vec![]);
+        let mut session = CopySession::new(scrollback, 10);
+        session.set_cursor(Cursor::new(0, 0));
+        session.start_selection(SelectionMode::Char);
+        session.set_cursor(Cursor::new(1, 0));
+
+        assert_eq!(session.selected_columns_for_row(2), None);
     }
 }

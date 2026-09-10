@@ -15,6 +15,7 @@ pub mod buffer;
 pub mod copy_mode;
 pub mod motion;
 pub mod permissions;
+pub mod region;
 pub mod scrollback;
 pub mod selection;
 
@@ -24,6 +25,7 @@ pub use buffer::{
 pub use copy_mode::{CopyMode, CopySession};
 pub use motion::{apply as apply_motion, Motion};
 pub use permissions::PermissionState;
+pub use region::{extract_region, selected_columns, SelectionMode};
 pub use scrollback::Scrollback;
 pub use selection::{extract_span, trim_trailing_blanks, Cursor};
 

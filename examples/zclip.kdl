@@ -49,7 +49,14 @@ keybinds {
         //   g G                top / bottom
         //   Ctrl-u Ctrl-d      half page up / down
         //   Ctrl-b Ctrl-f      page up / down
-        //   Esc                leave copy mode
+        //
+        //   v                  start/cancel char-wise selection
+        //   V                  line-wise selection (whole lines)
+        //   Ctrl-v             block selection (a rectangle -- use this for
+        //                      columnar output like `ls -l` or tables)
+        //   y                  yank the selection and leave copy mode
+        //   Esc                cancel the selection, or leave copy mode if
+        //                      there is no selection
 
         // Paste the most recent buffer into the pane you are currently in.
         // This is the tmux `prefix ]` equivalent. It works from any pane
