@@ -23,12 +23,19 @@ load_plugins {
 
 keybinds {
     normal {
-        // Enter copy mode: opens zclip floating over the pane you were in.
+        // Enter copy mode: captures the scrollback of the pane you are in
+        // and opens zclip floating so you can navigate it.
         //
         // NB: tmux's `prefix [` is deliberately NOT reproduced literally.
         // In a terminal, Ctrl+[ *is* the Escape byte (0x1b), so binding it
         // would make Escape unusable. Alt-based bindings avoid that entirely.
-        bind "Alt y" { LaunchOrFocusPlugin "zclip" { floating true; }; }
+        bind "Alt y" { MessagePlugin "zclip" { name "copy_mode"; launch_new true; floating true; }; }
+
+        // Leave copy mode. zclip deliberately reserves NO keys of its own:
+        // while its pane is focused Zellij consumes bound keys before they
+        // reach the plugin, so a hardcoded Escape would either be shadowed by
+        // your config or fight it. Bind whatever you prefer here.
+        bind "Alt q" { MessagePlugin "zclip" { name "cancel"; }; }
 
         // Paste the most recent buffer into the pane you are currently in.
         // This is the tmux `prefix ]` equivalent. It works from any pane

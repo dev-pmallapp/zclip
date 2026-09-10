@@ -45,7 +45,8 @@ load_plugins {
 
 keybinds {
     normal {
-        bind "Alt y" { LaunchOrFocusPlugin "zclip" { floating true; }; }
+        bind "Alt y" { MessagePlugin "zclip" { name "copy_mode"; launch_new true; floating true; }; }
+        bind "Alt q" { MessagePlugin "zclip" { name "cancel"; }; }
         bind "Alt p" { MessagePlugin "zclip" { name "paste"; launch_new true; }; }
         bind "Alt b" { MessagePlugin "zclip" { name "list"; floating true; launch_new true; }; }
     }

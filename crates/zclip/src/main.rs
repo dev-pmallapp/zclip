@@ -11,7 +11,10 @@
 
 use std::collections::BTreeMap;
 
-use zclip_core::{parse_buffer_limit, BufferRing, Cursor, PermissionState, DEFAULT_BUFFER_LIMIT};
+use zclip_core::{
+    parse_buffer_limit, BufferRing, CopyMode, Cursor, PermissionState, Scrollback,
+    DEFAULT_BUFFER_LIMIT,
+};
 use zellij_tile::prelude::*;
 
 /// Permissions zclip requests at load time.
@@ -34,6 +37,14 @@ const REQUIRED_PERMISSIONS: &[PermissionType] = &[
 /// How many characters of a buffer to show per row in the list.
 const PREVIEW_WIDTH: usize = 60;
 
+/// Window height assumed when entering copy mode.
+///
+/// `pipe()` has no idea how tall the pane is — only `render` is told — so entry
+/// picks a plausible value and the first render immediately reconciles the
+/// viewport against the real height. Nothing user-visible depends on this being
+/// right.
+const PROVISIONAL_HEIGHT: usize = 24;
+
 /// Top-level plugin state.
 #[derive(Default)]
 pub struct Zclip {
@@ -52,6 +63,11 @@ pub struct Zclip {
     /// Result of the last action, shown in the UI so that a no-op (empty
     /// selection, no target pane) explains itself instead of looking broken.
     status: Option<String>,
+    /// Copy-mode lifecycle. `Inactive` means we render the buffer list.
+    copy_mode: CopyMode,
+    /// Id of the most recent CLI pipe handled, so the trailing end-of-stream
+    /// message of that same pipe does not re-run the command. See `pipe`.
+    last_cli_pipe: Option<String>,
 }
 
 impl Zclip {
@@ -77,6 +93,52 @@ impl Zclip {
 
         if let Some(pane) = focused {
             self.target_pane = Some(PaneId::Terminal(pane.id));
+        }
+    }
+
+    /// Enters copy mode over the pane the user was last in.
+    ///
+    /// The scrollback is captured **once, on entry**, rather than tracked
+    /// live. A pane that keeps producing output will therefore drift from what
+    /// is displayed — that is a deliberate tradeoff (a moving target is
+    /// unselectable), and the UI says so rather than pretending otherwise.
+    fn enter_copy_mode(&mut self, height: usize) {
+        let Some(pane_id) = self.target_pane else {
+            self.status = Some("no terminal pane seen yet — focus one first".into());
+            return;
+        };
+
+        // `true` = include scrollback history, not just the viewport. Unlike
+        // the mouse-selection path, copy mode is precisely for reaching text
+        // that has scrolled off screen.
+        let contents = match get_pane_scrollback(pane_id, true) {
+            Ok(contents) => contents,
+            Err(err) => {
+                self.status = Some(format!("could not read pane: {err}"));
+                return;
+            }
+        };
+
+        let scrollback = Scrollback::from_parts(
+            contents.lines_above_viewport,
+            contents.viewport,
+            contents.lines_below_viewport,
+        );
+
+        if scrollback.is_empty() {
+            self.status = Some("target pane has no content to copy".into());
+            return;
+        }
+
+        let lines = scrollback.len();
+        self.copy_mode.enter(scrollback, height);
+        self.status = Some(format!("copy mode — {lines} line(s) captured"));
+    }
+
+    /// Leaves copy mode, returning to the buffer list.
+    fn exit_copy_mode(&mut self) {
+        if self.copy_mode.exit() {
+            self.status = Some("left copy mode".into());
         }
     }
 
@@ -177,6 +239,77 @@ impl Zclip {
         self.status = Some(format!("pasted {} bytes", text.len()));
     }
 
+    /// Renders the captured scrollback with the cursor line marked.
+    fn render_copy_mode(&mut self, rows: usize, cols: usize) {
+        // Reserve the header and footer lines; the rest is the text window.
+        let chrome = 3;
+        let height = rows.saturating_sub(chrome).max(1);
+
+        // The pane can be resized between renders, so the viewport is
+        // reconciled here against the live height rather than a stored one.
+        let Some(session) = self.copy_mode.session_mut() else {
+            return;
+        };
+        session.scroll_to_cursor(height);
+
+        let session = &*session;
+        let cursor_row = session.cursor().row;
+        let total = session.scrollback().len();
+
+        println!(
+            "zclip copy mode — line {}/{} (snapshot)",
+            cursor_row + 1,
+            total
+        );
+
+        for (row, line) in session.visible_rows(height) {
+            let marker = if row == cursor_row { '>' } else { ' ' };
+            // Truncate on char boundaries; terminal columns are characters,
+            // and byte-slicing here would panic on any multi-byte line.
+            let width = cols.saturating_sub(2);
+            let text: String = line.chars().take(width).collect();
+            println!("{marker} {text}");
+        }
+
+        if let Some(status) = &self.status {
+            println!("  {status}");
+        }
+    }
+
+    /// Renders the paste-buffer ring.
+    fn render_buffer_list(&mut self, rows: usize) {
+        println!(
+            "zclip {} — {} buffer(s)",
+            zclip_core::VERSION,
+            self.ring.len()
+        );
+        println!();
+
+        if self.ring.is_empty() {
+            println!("  (empty) enter copy mode to capture text");
+        } else {
+            // Leave room for the header, blank line, status and key hints.
+            let visible = rows.saturating_sub(5).max(1);
+            for (index, buffer) in self.ring.iter().take(visible).enumerate() {
+                let name = buffer.name().map(|n| format!(" [{n}]")).unwrap_or_default();
+                println!(
+                    "  {index}:{name} {} ({} line(s))",
+                    buffer.preview(PREVIEW_WIDTH),
+                    buffer.line_count()
+                );
+            }
+        }
+
+        println!();
+        if let Some(status) = &self.status {
+            println!("  {status}");
+        }
+        // No key hints: every action is bound by the user in their Zellij
+        // config and dispatched over `pipe`, so this plugin has no keys of its
+        // own to advertise. `y` is the one holdover, pending copy-mode yank.
+        println!("  y yank (mouse selection)   d delete");
+    }
+
     /// Routes a keypress. Only plain, unmodified keys are handled for now.
     fn handle_key(&mut self, key: &KeyWithModifier) -> bool {
         if !key.key_modifiers.is_empty() {
@@ -263,15 +396,22 @@ impl ZellijPlugin for Zclip {
             return false;
         }
 
-        // A CLI pipe delivers a trailing message with `payload: None` to signal
-        // end-of-stream, so `zellij pipe --name paste` arrives *twice* and a
-        // naive handler pastes twice. A keybind pipe, by contrast, legitimately
-        // carries no payload ("just paste the most recent buffer"), so the
-        // absence of a payload can only be interpreted alongside the source.
-        let is_end_of_stream =
-            matches!(pipe_message.source, PipeSource::Cli(_)) && pipe_message.payload.is_none();
-        if is_end_of_stream {
-            return false;
+        // A CLI pipe is a *stream*: `zellij pipe --name paste -- data` delivers
+        // the payload and then a trailing message with `payload: None` marking
+        // end-of-stream, so a naive handler runs the command twice.
+        //
+        // Absence of a payload cannot be used to detect that, for two reasons:
+        // a keybind pipe legitimately carries none ("paste the most recent
+        // buffer"), and a bare `zellij pipe --name copy_mode` carries none
+        // either — treating that as end-of-stream swallows the command
+        // outright. Instead, act on the first message of each CLI pipe and
+        // ignore the remainder, keyed on the pipe id the source carries.
+        // Keybind pipes are one-shot and never need this.
+        if let PipeSource::Cli(pipe_id) = &pipe_message.source {
+            if self.last_cli_pipe.as_deref() == Some(pipe_id.as_str()) {
+                return false;
+            }
+            self.last_cli_pipe = Some(pipe_id.clone());
         }
 
         let payload = pipe_message.payload.as_deref().map(str::trim);
@@ -294,8 +434,26 @@ impl ZellijPlugin for Zclip {
                 self.paste(selector);
                 true
             }
+            "copy_mode" => {
+                // Height is unknown until render, so enter with a provisional
+                // window; `render` reconciles it via scroll_to_cursor with the
+                // real pane height.
+                show_self(true);
+                self.enter_copy_mode(PROVISIONAL_HEIGHT);
+                true
+            }
+            "cancel" => {
+                // Copy mode is exited by a user-configured Zellij binding
+                // rather than a key this plugin reserves. While the plugin
+                // pane is focused Zellij consumes bound keys before they ever
+                // reach `Event::Key`, so hardcoding Escape here would either
+                // be shadowed by the user's config or fight it.
+                self.exit_copy_mode();
+                true
+            }
             "list" => {
                 // Summon the UI. `true` floats it if it was hidden.
+                self.exit_copy_mode();
                 show_self(true);
                 true
             }
@@ -306,43 +464,17 @@ impl ZellijPlugin for Zclip {
         }
     }
 
-    fn render(&mut self, rows: usize, _cols: usize) {
+    fn render(&mut self, rows: usize, cols: usize) {
         if let Some(message) = self.permissions.message() {
             println!("{message}");
             return;
         }
 
-        println!(
-            "zclip {} — {} buffer(s)",
-            zclip_core::VERSION,
-            self.ring.len()
-        );
-        println!();
-
-        if self.ring.is_empty() {
-            println!("  (empty) select text in a terminal pane, then press y");
+        if self.copy_mode.is_active() {
+            self.render_copy_mode(rows, cols);
         } else {
-            // Leave room for the header, blank line, status and key hints.
-            let visible = rows.saturating_sub(5).max(1);
-            for (index, buffer) in self.ring.iter().take(visible).enumerate() {
-                let name = buffer.name().map(|n| format!(" [{n}]")).unwrap_or_default();
-                println!(
-                    "  {index}:{name} {} ({} line(s))",
-                    buffer.preview(PREVIEW_WIDTH),
-                    buffer.line_count()
-                );
-            }
+            self.render_buffer_list(rows);
         }
-
-        println!();
-        if let Some(status) = &self.status {
-            println!("  {status}");
-        }
-        // Paste is intentionally absent: it is driven by a keybinding from
-        // whatever pane you are in, not from here. `y` remains the only yank
-        // path until copy mode (#16/#17/#18) replaces it with a keyboard
-        // selection; it still requires a mouse selection in the target pane.
-        println!("  y yank (mouse selection)   d delete");
     }
 }
 
