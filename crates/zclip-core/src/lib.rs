@@ -11,8 +11,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod buffer;
 pub mod permissions;
 
+pub use buffer::{BufferId, BufferLimitError, BufferRing, PasteBuffer, DEFAULT_BUFFER_LIMIT};
 pub use permissions::PermissionState;
 
 /// The version of the zclip core library, as reported to users and logs.
