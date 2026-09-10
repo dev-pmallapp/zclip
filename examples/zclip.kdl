@@ -31,11 +31,25 @@ keybinds {
         // would make Escape unusable. Alt-based bindings avoid that entirely.
         bind "Alt y" { MessagePlugin "zclip" { name "copy_mode"; launch_new true; floating true; }; }
 
-        // Leave copy mode. zclip deliberately reserves NO keys of its own:
-        // while its pane is focused Zellij consumes bound keys before they
-        // reach the plugin, so a hardcoded Escape would either be shadowed by
-        // your config or fight it. Bind whatever you prefer here.
+        // Leave copy mode. Escape also works from inside copy mode.
+        //
+        // Copy mode grabs the keyboard (InterceptInput) so that vi motions
+        // behave the same regardless of what you have bound -- which means
+        // that while it is active, Zellij never sees your bindings, including
+        // this one. So copy mode recognises Escape itself. This binding is the
+        // way out when copy mode is NOT active, and a belt-and-braces escape
+        // hatch otherwise.
         bind "Alt q" { MessagePlugin "zclip" { name "cancel"; }; }
+
+        // Motions inside copy mode are NOT bound here -- copy mode owns the
+        // keyboard while active and interprets them directly:
+        //   h j k l / arrows   move by character and line
+        //   w b e              word forward / back / end
+        //   0 ^ $              line start / first non-blank / line end
+        //   g G                top / bottom
+        //   Ctrl-u Ctrl-d      half page up / down
+        //   Ctrl-b Ctrl-f      page up / down
+        //   Esc                leave copy mode
 
         // Paste the most recent buffer into the pane you are currently in.
         // This is the tmux `prefix ]` equivalent. It works from any pane

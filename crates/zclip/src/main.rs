@@ -12,8 +12,8 @@
 use std::collections::BTreeMap;
 
 use zclip_core::{
-    parse_buffer_limit, BufferRing, CopyMode, Cursor, PermissionState, Scrollback,
-    DEFAULT_BUFFER_LIMIT,
+    apply_motion, parse_buffer_limit, BufferRing, CopyMode, Cursor, Motion, PermissionState,
+    Scrollback, DEFAULT_BUFFER_LIMIT,
 };
 use zellij_tile::prelude::*;
 
@@ -23,15 +23,19 @@ use zellij_tile::prelude::*;
 ///   pane the user was last in (the yank source and paste target).
 /// - `ReadPaneContents` — `get_pane_scrollback`, to read the selection.
 /// - `WriteToStdin` — `write_chars_to_pane_id`, to paste.
+/// - `InterceptInput` — grab the keyboard during copy mode, so vi motions work
+///   regardless of what the user has bound. Only held while copy mode is
+///   active; see `enter_copy_mode` / `exit_copy_mode`.
 ///
 /// Capabilities for later milestones are deliberately *not* requested, so users
 /// are not asked to approve something zclip cannot yet do:
-/// `InterceptInput` (copy-mode key grabbing, M2), `WriteToClipboard` /
-/// `RunCommands` (clipboard bridge, M3), `ReadCliPipes` (`zellij pipe`, M5).
+/// `WriteToClipboard` / `RunCommands` (clipboard bridge, M3), `ReadCliPipes`
+/// (`zellij pipe`, M5).
 const REQUIRED_PERMISSIONS: &[PermissionType] = &[
     PermissionType::ReadApplicationState,
     PermissionType::ReadPaneContents,
     PermissionType::WriteToStdin,
+    PermissionType::InterceptInput,
 ];
 
 /// How many characters of a buffer to show per row in the list.
@@ -68,6 +72,13 @@ pub struct Zclip {
     /// Id of the most recent CLI pipe handled, so the trailing end-of-stream
     /// message of that same pipe does not re-run the command. See `pipe`.
     last_cli_pipe: Option<String>,
+    /// Text-window height from the most recent render.
+    ///
+    /// Paging motions need the window size, but key events carry no geometry --
+    /// only `render` is told the pane dimensions. This is the last known good
+    /// value rather than a guess; it is refreshed on every render, so it can
+    /// only be stale for the single keypress following a resize.
+    last_render_height: usize,
 }
 
 impl Zclip {
@@ -131,15 +142,102 @@ impl Zclip {
         }
 
         let lines = scrollback.len();
+        let pane_label = match pane_id {
+            PaneId::Terminal(id) => format!("terminal_{id}"),
+            PaneId::Plugin(id) => format!("plugin_{id}"),
+        };
         self.copy_mode.enter(scrollback, height);
-        self.status = Some(format!("copy mode — {lines} line(s) captured"));
+
+        // Grab the keyboard so vi motions work no matter what the user has
+        // bound. This is held ONLY while copy mode is active -- see
+        // `exit_copy_mode`, and the `BeforeClose` handler which releases it if
+        // the pane is closed out from under us. Leaking an intercept would
+        // leave the user's keyboard captured by an invisible plugin.
+        intercept_key_presses();
+
+        self.status = Some(format!("copy mode — {lines} line(s) from {pane_label}"));
     }
 
     /// Leaves copy mode, returning to the buffer list.
+    ///
+    /// Releasing the keyboard is unconditional rather than gated on the state
+    /// transition: if the intercept were ever set without the session (or vice
+    /// versa) the safe direction to fail is "release".
     fn exit_copy_mode(&mut self) {
+        clear_key_presses_intercepts();
         if self.copy_mode.exit() {
             self.status = Some("left copy mode".into());
         }
+    }
+
+    /// Maps a key to a cursor motion, vi-style.
+    ///
+    /// Returns `None` for keys that are not motions, which the caller treats as
+    /// "not handled" so they can be routed elsewhere (e.g. exit).
+    fn motion_for(key: &KeyWithModifier) -> Option<Motion> {
+        let ctrl = key.key_modifiers.contains(&KeyModifier::Ctrl);
+
+        let motion = match (&key.bare_key, ctrl) {
+            // Paging. Checked before the plain-character arm so that Ctrl-d
+            // is a half-page down rather than the literal character 'd'.
+            (BareKey::Char('u'), true) => Motion::HalfPageUp,
+            (BareKey::Char('d'), true) => Motion::HalfPageDown,
+            (BareKey::Char('b'), true) => Motion::PageUp,
+            (BareKey::Char('f'), true) => Motion::PageDown,
+            (_, true) => return None,
+
+            (BareKey::Char('h'), _) | (BareKey::Left, _) => Motion::Left,
+            (BareKey::Char('j'), _) | (BareKey::Down, _) => Motion::Down,
+            (BareKey::Char('k'), _) | (BareKey::Up, _) => Motion::Up,
+            (BareKey::Char('l'), _) | (BareKey::Right, _) => Motion::Right,
+
+            (BareKey::Char('0'), _) | (BareKey::Home, _) => Motion::LineStart,
+            (BareKey::Char('^'), _) => Motion::LineFirstNonBlank,
+            (BareKey::Char('$'), _) | (BareKey::End, _) => Motion::LineEnd,
+
+            (BareKey::Char('w'), _) => Motion::WordForward,
+            (BareKey::Char('b'), _) => Motion::WordBackward,
+            (BareKey::Char('e'), _) => Motion::WordEnd,
+
+            // Single `g` rather than vi's `gg`: a two-key sequence needs a
+            // pending-input state machine, which belongs with operators
+            // (#18) rather than being half-built here.
+            (BareKey::Char('g'), _) => Motion::Top,
+            (BareKey::Char('G'), _) => Motion::Bottom,
+
+            (BareKey::PageUp, _) => Motion::PageUp,
+            (BareKey::PageDown, _) => Motion::PageDown,
+
+            _ => return None,
+        };
+        Some(motion)
+    }
+
+    /// Handles a key while copy mode owns the keyboard.
+    fn handle_copy_mode_key(&mut self, key: &KeyWithModifier) -> bool {
+        // While intercepting we receive *every* key, including whatever the
+        // user bound to the `cancel` pipe command -- Zellij never sees it to
+        // act on it. So copy mode has to recognise its own exit key.
+        if key.bare_key == BareKey::Esc {
+            self.exit_copy_mode();
+            return true;
+        }
+
+        let Some(motion) = Self::motion_for(key) else {
+            return false;
+        };
+        let Some(session) = self.copy_mode.session_mut() else {
+            return false;
+        };
+
+        let next = apply_motion(
+            motion,
+            session.scrollback(),
+            session.cursor(),
+            self.last_render_height,
+        );
+        session.set_cursor(next);
+        true
     }
 
     /// Captures the current selection in the target pane into the ring.
@@ -247,6 +345,8 @@ impl Zclip {
 
         // The pane can be resized between renders, so the viewport is
         // reconciled here against the live height rather than a stored one.
+        self.last_render_height = height;
+
         let Some(session) = self.copy_mode.session_mut() else {
             return;
         };
@@ -352,6 +452,9 @@ impl ZellijPlugin for Zclip {
 
         self.config = configuration;
         self.ring = BufferRing::new(limit);
+        // Until the first render tells us the real geometry, paging motions
+        // would otherwise treat the window as zero-height and step one line.
+        self.last_render_height = PROVISIONAL_HEIGHT;
         self.own_plugin_id = Some(get_plugin_ids().plugin_id);
 
         request_permission(REQUIRED_PERMISSIONS);
@@ -359,6 +462,8 @@ impl ZellijPlugin for Zclip {
             EventType::PermissionRequestResult,
             EventType::PaneUpdate,
             EventType::Key,
+            EventType::InterceptedKeyPress,
+            EventType::BeforeClose,
         ]);
     }
 
@@ -377,7 +482,31 @@ impl ZellijPlugin for Zclip {
                 if !self.ready() {
                     return false;
                 }
+                // Copy mode normally receives keys as InterceptedKeyPress, but
+                // route this path too: it is the fallback when InterceptInput
+                // is denied, and it also covers keys that reach the focused
+                // plugin pane without passing through the intercept layer.
+                // Zellij delivers a given press as one or the other, never
+                // both, so this cannot double-handle.
+                if self.copy_mode.is_active() {
+                    return self.handle_copy_mode_key(&key);
+                }
                 self.handle_key(&key)
+            }
+            Event::InterceptedKeyPress(key) => {
+                if !self.copy_mode.is_active() {
+                    // We should not be intercepting at all in this state.
+                    clear_key_presses_intercepts();
+                    return false;
+                }
+                self.handle_copy_mode_key(&key)
+            }
+            Event::BeforeClose => {
+                // Safety valve: if the pane is closed while copy mode holds the
+                // keyboard, release it. Otherwise the intercept outlives the UI
+                // and the user is left typing into nothing.
+                clear_key_presses_intercepts();
+                false
             }
             _ => false,
         }

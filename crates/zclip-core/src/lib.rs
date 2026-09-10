@@ -13,6 +13,7 @@
 
 pub mod buffer;
 pub mod copy_mode;
+pub mod motion;
 pub mod permissions;
 pub mod scrollback;
 pub mod selection;
@@ -21,6 +22,7 @@ pub use buffer::{
     parse_buffer_limit, BufferId, BufferLimitError, BufferRing, PasteBuffer, DEFAULT_BUFFER_LIMIT,
 };
 pub use copy_mode::{CopyMode, CopySession};
+pub use motion::{apply as apply_motion, Motion};
 pub use permissions::PermissionState;
 pub use scrollback::Scrollback;
 pub use selection::{extract_span, trim_trailing_blanks, Cursor};
