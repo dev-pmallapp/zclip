@@ -1,6 +1,6 @@
 ---
 title: Ship an example KDL config and plugin alias
-milestone: M5 - Config, Keybindings & Pipes
+milestone: M2 - Copy Mode & Selection
 labels: task,area:config,area:docs,priority:p0
 ---
 

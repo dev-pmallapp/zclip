@@ -1,6 +1,6 @@
 ---
 title: Run zclip as a background/headless plugin
-milestone: M5 - Config, Keybindings & Pipes
+milestone: M2 - Copy Mode & Selection
 labels: story,area:config,priority:p1
 ---
 

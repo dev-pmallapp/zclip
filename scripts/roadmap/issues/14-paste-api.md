@@ -28,5 +28,21 @@ permission.
 - System clipboard bridging (later milestone)
 - Buffer selection UI (menu/picker) beyond a minimal default-to-most-recent behavior
 
+## Post-implementation correction (M1 review)
+
+The acceptance criterion "a paste action selects a buffer from the ring" was met,
+but the trigger is wrong: paste is currently bound to a keypress handled by
+`Event::Key`, which **only fires while the zclip pane itself is focused**. That
+is backwards. tmux pastes into the pane you are working in, and requiring the
+user to focus the clipboard plugin first defeats the purpose.
+
+The fix is `MessagePlugin` in a keybinding, which reaches the plugin as
+`pipe()` with `PipeSource::Keybind` and works while a terminal pane keeps
+focus. Target resolution moves to `get_focused_pane_info()` rather than the
+last-focused pane tracked from `PaneUpdate`.
+
+Tracked in #47; the focused-only key handler is removed there rather than kept
+as a second input path.
+
 ## Depends on
 Implement the PasteBuffer and bounded BufferRing data model, Implement the permission request and gating flow

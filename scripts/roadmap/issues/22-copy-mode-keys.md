@@ -25,5 +25,22 @@ Copy mode needs a clean lifecycle: a keybinding to enter it, a way to intercept 
 - The actual motion/selection logic once a key is intercepted (issue 23, issue 24).
 - Rendering the copy-mode overlay (covered alongside issue 24).
 
+## Rendering constraint (verified)
+
+A Zellij plugin **cannot draw over a terminal pane**. tmux enters copy mode
+*in place*; zclip cannot. Copy mode must therefore render a *copy* of the
+captured scrollback inside zclip's own (ideally full-screen floating) pane, and
+the cursor the user moves is zclip's, not the terminal's.
+
+This is close to indistinguishable full-screen, but it has real consequences:
+the captured text is a snapshot, so a pane that keeps producing output will
+drift from what is displayed. Decide explicitly whether to re-fetch via
+`Event::PaneRenderReport` or freeze on entry, and say so in the UI.
+
+`intercept_key_presses()` (`shim.rs:2775`) and `Event::InterceptedKeyPress`
+(`data.rs:1019`) are confirmed to exist, so grabbing keys while another pane is
+focused is possible -- but it does not solve rendering, which is the binding
+constraint here.
+
 ## Depends on
 Read pane scrollback into a selectable buffer

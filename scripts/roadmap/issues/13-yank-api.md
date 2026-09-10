@@ -28,5 +28,21 @@ pane content capture (gated behind the appropriate permission) into a new
 - Paste (separate story)
 - System clipboard bridging on yank (later milestone)
 
+## Post-implementation correction (M1 review)
+
+**As implemented, this story does not deliver a usable feature.** `Zclip::yank`
+reads `PaneContents::selected_text`, which the host only populates after a
+**mouse drag**. There is no keyboard path to create a selection, so the tmux
+workflow this project exists to reproduce is impossible with this issue alone.
+
+The acceptance criteria above are all met; the criteria themselves were wrong.
+"Read the relevant pane content" was specified without asking where a selection
+comes from in a keyboard-driven workflow. The answer is copy mode (#16, #17,
+#18), which owns cursor movement and selection and then calls into the ring.
+
+Keep this issue's contribution -- ring push, blank rejection, permission gating
+-- but treat mouse-selection yank as a secondary convenience path, not the
+primary one. See #47 for the corrected keybinding contract.
+
 ## Depends on
 Implement the PasteBuffer and bounded BufferRing data model, Implement the permission request and gating flow
