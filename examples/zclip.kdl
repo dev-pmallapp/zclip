@@ -15,40 +15,88 @@ plugins {
 }
 
 load_plugins {
-    // Start zclip hidden at session start. Without this, the paste binding has
-    // to launch the plugin on first use (launch_new), which works but adds a
-    // noticeable delay to the very first paste.
+    // Start zclip hidden at session start. This is REQUIRED, not an
+    // optimisation: zclip is stateful (it holds the buffer ring), and
+    // MessagePlugin (see below) can only reach an already-running plugin
+    // instance -- it cannot start one. Without this block none of the
+    // bindings below would have anything to talk to.
     zclip
 }
 
 keybinds {
     normal {
+        // A note on `launch_new`, since it is tempting to reach for here and
+        // it is wrong: on MessagePlugin, `launch_new true` does NOT mean
+        // "start zclip if it isn't running yet". It stamps a fresh random
+        // UUID into the plugin's configuration on every single keypress, and
+        // plugin identity is (location, configuration) -- so a new UUID never
+        // matches the resident instance and every keypress spawns a brand
+        // new, empty zclip. Your buffer ring would evaporate between yank
+        // and paste. Never put `launch_new` on a MessagePlugin action for a
+        // stateful plugin like zclip; rely on `load_plugins` above instead.
+
         // Enter copy mode: captures the scrollback of the pane you are in
         // and opens zclip floating so you can navigate it.
         //
         // NB: tmux's `prefix [` is deliberately NOT reproduced literally.
         // In a terminal, Ctrl+[ *is* the Escape byte (0x1b), so binding it
         // would make Escape unusable. Alt-based bindings avoid that entirely.
-        bind "Alt y" { MessagePlugin "zclip" { name "copy_mode"; launch_new true; floating true; }; }
+        //
+        // This binding fires two actions in sequence: LaunchOrFocusPlugin's
+        // `move_to_focused_tab` first relocates zclip's pane into whichever
+        // tab you are currently in (the resident instance's pane otherwise
+        // stays wherever it started), then MessagePlugin tells that same
+        // instance to enter copy mode. Plain MessagePlugin has no
+        // `move_to_focused_tab` equivalent, which is why this needs both
+        // actions rather than one.
+        //
+        // IMPORTANT: use the `zclip` ALIAS here, exactly as `load_plugins`
+        // above does. Do not substitute the full `file:` URL. Zellij matches
+        // a keybind's plugin against a running pane with
+        // `RunPluginOrAlias::is_equivalent_to_run` (zellij-utils
+        // src/input/layout.rs:191), which has arms for (Alias, Alias),
+        // (Alias, RunPlugin) and (RunPlugin, RunPlugin) -- but NOT for
+        // (RunPlugin, Alias), which falls through to `_ => false`. Naming the
+        // plugin by URL here while `load_plugins` names it by alias is that
+        // unhandled combination: LaunchOrFocusPlugin never finds the resident
+        // instance and spawns a new one on every keypress. Confusingly, the
+        // paste binding would keep working, because MessagePlugin routes on
+        // the RESOLVED (location, configuration) pair and is blind to the
+        // alias/URL distinction -- so the breakage looks like it is specific
+        // to copy mode.
+        bind "Alt y" {
+            LaunchOrFocusPlugin "zclip" { floating true; move_to_focused_tab true; };
+            MessagePlugin "zclip" { name "copy_mode"; };
+        }
 
         // Leave copy mode. Escape also works from inside copy mode.
         //
-        // Copy mode grabs the keyboard (InterceptInput) so that vi motions
-        // behave the same regardless of what you have bound -- which means
-        // that while it is active, Zellij never sees your bindings, including
-        // this one. So copy mode recognises Escape itself. This binding is the
-        // way out when copy mode is NOT active, and a belt-and-braces escape
-        // hatch otherwise.
+        // Copy mode grabs the keyboard (InterceptInput), but that only claims
+        // keys that are UNBOUND in your current input mode -- Zellij resolves
+        // a bound key to its action before the intercept ever sees it. So
+        // your own keybindings, including this one, keep working while copy
+        // mode is active: `Alt q` genuinely cancels it. Escape also works
+        // from inside copy mode for the same reason -- it is unbound in
+        // Normal mode by default, so it reaches the plugin as an intercepted
+        // key rather than an action, and copy mode recognises it itself.
+        // This binding is simply the always-available, config-driven way out.
         bind "Alt q" { MessagePlugin "zclip" { name "cancel"; }; }
 
-        // Motions inside copy mode are NOT bound here -- copy mode owns the
-        // keyboard while active and interprets them directly:
+        // Motions inside copy mode are NOT bound here -- these keys are all
+        // unbound in Normal mode, so copy mode receives and interprets them
+        // directly while it is active:
         //   h j k l / arrows   move by character and line
         //   w b e              word forward / back / end
         //   0 ^ $              line start / first non-blank / line end
         //   g G                top / bottom
         //   Ctrl-u Ctrl-d      half page up / down
         //   Ctrl-b Ctrl-f      page up / down
+        //
+        //   NOTE: under zellij's DEFAULT keybinds, `Ctrl-b` is bound to
+        //   `SwitchToMode "Tmux"`, so that binding is resolved before copy
+        //   mode's intercept ever sees the key and page-up-by-Ctrl-b will not
+        //   work here. Use `PageUp` instead, or `unbind "Ctrl b"` in your
+        //   config if you want the vi key back.
         //
         //   v                  start/cancel char-wise selection
         //   V                  line-wise selection (whole lines)
@@ -57,18 +105,54 @@ keybinds {
         //   y                  yank the selection and leave copy mode
         //   Esc                cancel the selection, or leave copy mode if
         //                      there is no selection
+        //
+        // Also note: ALL of your `Alt` bindings remain live during copy mode
+        // too (as do zellij's own defaults, e.g. `Alt n` = NewPane, `Alt
+        // h/j/k/l` = MoveFocus) -- those keys are bound, so they do their
+        // normal thing rather than being swallowed by copy mode.
 
         // Paste the most recent buffer into the pane you are currently in.
         // This is the tmux `prefix ]` equivalent. It works from any pane
         // because MessagePlugin reaches zclip even while it is unfocused or
         // hidden -- you do not have to focus the plugin to paste.
-        bind "Alt p" { MessagePlugin "zclip" { name "paste"; launch_new true; }; }
+        //
+        // Deliberately a single, plain MessagePlugin action with no
+        // LaunchOrFocusPlugin alongside it: paste must NOT steal focus or
+        // move zclip's pane into your tab, since the whole point is to write
+        // into the pane you are already in.
+        bind "Alt p" { MessagePlugin "zclip" { name "paste"; }; }
 
         // Paste a specific buffer, by name or by index (0 = most recent).
         // `payload` is the selector; a name always wins over an index.
-        bind "Alt P" { MessagePlugin "zclip" { name "paste"; payload "1"; launch_new true; }; }
+        bind "Alt P" { MessagePlugin "zclip" { name "paste"; payload "1"; }; }
 
-        // Show the buffer browser.
-        bind "Alt b" { MessagePlugin "zclip" { name "list"; floating true; launch_new true; }; }
+        // Show the buffer browser. Unlike copy mode, the list view has no
+        // single pane to swap into -- it is genuinely a floating UI -- so
+        // this binding still fires two actions: LaunchOrFocusPlugin's
+        // `move_to_focused_tab` first relocates zclip's pane into whichever
+        // tab you are currently in (the resident instance's pane otherwise
+        // stays wherever it started), then MessagePlugin tells that same
+        // instance to open the list view. Plain MessagePlugin has no
+        // `move_to_focused_tab` equivalent, which is why this needs both
+        // actions rather than one.
+        //
+        // IMPORTANT: use the `zclip` ALIAS here, exactly as `load_plugins`
+        // above does. Do not substitute the full `file:` URL. Zellij matches
+        // a keybind's plugin against a running pane with
+        // `RunPluginOrAlias::is_equivalent_to_run` (zellij-utils
+        // src/input/layout.rs:191), which has arms for (Alias, Alias),
+        // (Alias, RunPlugin) and (RunPlugin, RunPlugin) -- but NOT for
+        // (RunPlugin, Alias), which falls through to `_ => false`. Naming the
+        // plugin by URL here while `load_plugins` names it by alias is that
+        // unhandled combination: LaunchOrFocusPlugin never finds the resident
+        // instance and spawns a new one on every keypress. Confusingly, the
+        // paste binding would keep working, because MessagePlugin routes on
+        // the RESOLVED (location, configuration) pair and is blind to the
+        // alias/URL distinction -- so the breakage looks like it is specific
+        // to whichever binding uses LaunchOrFocusPlugin.
+        bind "Alt b" {
+            LaunchOrFocusPlugin "zclip" { floating true; move_to_focused_tab true; };
+            MessagePlugin "zclip" { name "list"; };
+        }
     }
 }

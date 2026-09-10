@@ -23,9 +23,12 @@ use zellij_tile::prelude::*;
 ///   pane the user was last in (the yank source and paste target).
 /// - `ReadPaneContents` — `get_pane_scrollback`, to read the selection.
 /// - `WriteToStdin` — `write_chars_to_pane_id`, to paste.
-/// - `InterceptInput` — grab the keyboard during copy mode, so vi motions work
-///   regardless of what the user has bound. Only held while copy mode is
-///   active; see `enter_copy_mode` / `exit_copy_mode`.
+/// - `InterceptInput` — grab whatever keys are *unbound* in the user's current
+///   input mode during copy mode, so vi motions work without the user having
+///   to bind each one by hand. Keys the user HAS bound are resolved by Zellij
+///   before the intercept is ever consulted, so those keypresses still act on
+///   the binding and never arrive here. Only held while copy mode is active;
+///   see `enter_copy_mode` / `exit_copy_mode`.
 ///
 /// Capabilities for later milestones are deliberately *not* requested, so users
 /// are not asked to approve something zclip cannot yet do:
@@ -137,6 +140,14 @@ impl Zclip {
     /// is displayed — that is a deliberate tradeoff (a moving target is
     /// unselectable), and the UI says so rather than pretending otherwise.
     fn enter_copy_mode(&mut self, height: usize) {
+        // Re-entering would re-snapshot the pane and throw away an
+        // in-progress selection. Copy mode is a single keypress away, so an
+        // accidental double-press must not destroy work; treat the second
+        // press as "show me the copy mode I already have".
+        if self.copy_mode.is_active() {
+            return;
+        }
+
         let Some(pane_id) = self.target_pane else {
             self.status = Some("no terminal pane seen yet — focus one first".into());
             return;
@@ -169,27 +180,40 @@ impl Zclip {
             PaneId::Terminal(id) => format!("terminal_{id}"),
             PaneId::Plugin(id) => format!("plugin_{id}"),
         };
+        // Capturing the scrollback above, before the swap, matters for two
+        // reasons: it reads the target pane while it is still in place (post-
+        // swap it would be suppressed), and a failed capture must not leave
+        // zclip standing in for a pane it has nothing to show for.
         self.copy_mode.enter(scrollback, height);
 
-        // Grab the keyboard so vi motions work no matter what the user has
-        // bound. This is held ONLY while copy mode is active -- see
-        // `exit_copy_mode`, and the `BeforeClose` handler which releases it if
-        // the pane is closed out from under us. Leaking an intercept would
-        // leave the user's keyboard captured by an invisible plugin.
+        // Grab whatever keys are unbound in the user's current input mode, so
+        // vi motions work without the user having to bind each one. This is
+        // held ONLY while copy mode is active -- see `exit_copy_mode`, and the
+        // `BeforeClose` handler which releases it if the pane is closed out
+        // from under us. Leaking an intercept would leave the user's keyboard
+        // captured by an invisible plugin.
         intercept_key_presses();
 
         self.status = Some(format!("copy mode — {lines} line(s) from {pane_label}"));
     }
 
-    /// Leaves copy mode, returning to the buffer list.
+    /// Leaves copy mode and returns the plugin pane to hiding.
     ///
     /// Releasing the keyboard is unconditional rather than gated on the state
     /// transition: if the intercept were ever set without the session (or vice
     /// versa) the safe direction to fail is "release".
+    ///
+    /// Hiding again is not cosmetic. `enter_copy_mode` reveals this pane with
+    /// `show_self`, and a plugin pane left visible and focused is reported as
+    /// the focused pane on the next `PaneUpdate` -- which makes
+    /// `track_focused_pane` fall back to guessing a terminal, corrupting the
+    /// paste target. Staying hidden between invocations is also what makes
+    /// paste-from-any-pane work at all.
     fn exit_copy_mode(&mut self) {
         clear_key_presses_intercepts();
         if self.copy_mode.exit() {
             self.status = Some("left copy mode".into());
+            hide_self();
         }
     }
 
@@ -205,6 +229,11 @@ impl Zclip {
             // is a half-page down rather than the literal character 'd'.
             (BareKey::Char('u'), true) => Motion::HalfPageUp,
             (BareKey::Char('d'), true) => Motion::HalfPageDown,
+            // Zellij's default config binds `Ctrl b` to `SwitchToMode
+            // "Tmux"`, so this arm is unreachable under default keybinds --
+            // Zellij resolves the bound key before the intercept ever sees
+            // it. `PageUp` (below) is the working alternative; a user who
+            // wants the vi key back can `unbind "Ctrl b"` in their config.
             (BareKey::Char('b'), true) => Motion::PageUp,
             (BareKey::Char('f'), true) => Motion::PageDown,
             (_, true) => return None,
@@ -267,13 +296,17 @@ impl Zclip {
         }
     }
 
-    /// Handles a key while copy mode owns the keyboard.
+    /// Handles a key delivered to copy mode, whether intercepted or not.
     fn handle_copy_mode_key(&mut self, key: &KeyWithModifier) -> bool {
         let ctrl = key.key_modifiers.contains(&KeyModifier::Ctrl);
 
-        // While intercepting we receive *every* key, including whatever the
-        // user bound to the `cancel` pipe command -- Zellij never sees it to
-        // act on it. So copy mode has to recognise its own exit key.
+        // Interception only ever delivers keys that are UNBOUND in the user's
+        // current input mode -- Zellij resolves bound keys to their action
+        // before the intercept is consulted, so a user's `cancel` binding
+        // still fires and works during copy mode. `Esc` is handled here
+        // because, under the default config, `Esc` is unbound in Normal mode
+        // and therefore reaches the plugin as an intercepted key rather than
+        // an action -- nothing else can act on it, so copy mode has to.
         if key.bare_key == BareKey::Esc {
             // Escape backs out one level at a time, as in vi: it drops an
             // active selection first and only leaves copy mode once there is
@@ -701,16 +734,25 @@ impl ZellijPlugin for Zclip {
                 // Height is unknown until render, so enter with a provisional
                 // window; `render` reconciles it via scroll_to_cursor with the
                 // real pane height.
-                show_self(true);
                 self.enter_copy_mode(PROVISIONAL_HEIGHT);
+                // Reveal the pane ONLY on success. `enter_copy_mode` bails on
+                // three separate paths (no target pane, unreadable pane, empty
+                // scrollback), and showing ourselves first meant a user who
+                // asked for copy mode was instead handed the buffer list --
+                // reading "(empty) enter copy mode to capture text", which
+                // looks precisely like the plugin ignoring the keypress.
+                if self.copy_mode.is_active() {
+                    show_self(true);
+                }
                 true
             }
             "cancel" => {
                 // Copy mode is exited by a user-configured Zellij binding
-                // rather than a key this plugin reserves. While the plugin
-                // pane is focused Zellij consumes bound keys before they ever
-                // reach `Event::Key`, so hardcoding Escape here would either
-                // be shadowed by the user's config or fight it.
+                // rather than a key this plugin reserves. A bound key is
+                // resolved by Zellij before the intercept layer is ever
+                // consulted, so this binding genuinely reaches and fires
+                // during copy mode -- it is a real exit route, not merely a
+                // fallback for when copy mode is inactive.
                 self.exit_copy_mode();
                 true
             }
