@@ -38,6 +38,14 @@ plugins {
         // (kept below for completeness) is shadowed and never fires unless
         // you `unbind "Ctrl b"` yourself; `PageUp` is the working default.
         //
+        // NOTE: you do not have to discover a shadowed key the hard way, by
+        // pressing it and watching nothing happen. zclip cross-checks this
+        // whole table against your `keybinds` once at startup (as soon as
+        // Zellij reports mode info back to it) and lists anything shadowed
+        // -- like the `Ctrl b` case above -- in the buffer-list view (`Alt
+        // b` below). This is purely a report: it does not rebind, refuse,
+        // or otherwise second-guess anything you have configured.
+        //
         // `keymap` selects a whole preset. "vi" is the default (used when
         // `keymap` is absent); "emacs" is also built in.
         // keymap "vi"

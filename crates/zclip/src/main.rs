@@ -131,6 +131,22 @@ pub struct Zclip {
     /// uppercase `Char` to lowercase-plus-`Shift` exactly the way its `Eq`
     /// does, so the two never collide.
     keys: HashMap<KeyWithModifier, CopyModeAction>,
+    /// Whether the one-time cross-check of `keys` against the user's own
+    /// Zellij keybinds (see [`Zclip::detect_shadowed_keys`]) has already
+    /// run. `ModeUpdate` fires on every mode change -- entering Pane mode,
+    /// Resize mode, and so on -- and the user's keybinds do not change at
+    /// runtime, so re-running the check on each one would find nothing new
+    /// and just re-append the same warning to `status` forever. This flag
+    /// is what makes the check "once at startup" rather than "once per mode
+    /// change".
+    shadow_check_done: bool,
+    /// Copy-mode keys from `keys` that Zellij has ALSO bound in the user's
+    /// base input mode, and that interception can therefore never deliver.
+    /// See [`Zclip::detect_shadowed_keys`] for how this is built. Empty
+    /// until the one-time check has run, and stays empty forever if it
+    /// finds nothing -- this is purely a diagnostic, not something that
+    /// changes what `keys` itself contains or how a key behaves.
+    shadowed_keys: Vec<String>,
 }
 
 impl Zclip {
@@ -589,6 +605,11 @@ impl Zclip {
     }
 
     /// Renders the paste-buffer ring.
+    ///
+    /// This is also where `shadowed_keys` (see `detect_shadowed_keys`) is
+    /// shown in full: it is zclip's diagnostics surface, the one place a
+    /// user already goes to see what state the plugin is in, so a shadowed
+    /// copy-mode key belongs here rather than in a channel of its own.
     fn render_buffer_list(&mut self, rows: usize) {
         println!(
             "zclip {} — {} buffer(s)",
@@ -597,11 +618,27 @@ impl Zclip {
         );
         println!();
 
+        // Rows this render reserves for everything that is NOT a buffer
+        // entry: header, blank line, [shadowed-key block], blank line,
+        // status, key hints. The shadowed-key block's size is data-dependent
+        // (a heading plus one line per entry, plus its own trailing blank),
+        // so it is folded into this reservation rather than a fixed
+        // constant -- otherwise a config with several shadowed keys would
+        // push buffer entries off the bottom of the pane instead of the
+        // other way around.
+        let shadow_rows = if self.shadowed_keys.is_empty() {
+            0
+        } else {
+            // +1 for the block's own heading line; the entries themselves
+            // are the rest.
+            self.shadowed_keys.len() + 1
+        };
+        let chrome = 5 + shadow_rows;
+
         if self.ring.is_empty() {
             println!("  (empty) enter copy mode to capture text");
         } else {
-            // Leave room for the header, blank line, status and key hints.
-            let visible = rows.saturating_sub(5).max(1);
+            let visible = rows.saturating_sub(chrome).max(1);
             for (index, buffer) in self.ring.iter().take(visible).enumerate() {
                 let name = buffer.name().map(|n| format!(" [{n}]")).unwrap_or_default();
                 println!(
@@ -609,6 +646,13 @@ impl Zclip {
                     buffer.preview(PREVIEW_WIDTH),
                     buffer.line_count()
                 );
+            }
+        }
+
+        if !self.shadowed_keys.is_empty() {
+            println!("  shadowed by your Zellij keybinds (never reach copy mode):");
+            for entry in &self.shadowed_keys {
+                println!("    {entry}");
             }
         }
 
@@ -644,6 +688,124 @@ impl Zclip {
             }
             _ => false,
         }
+    }
+
+    /// Cross-checks the resolved copy-mode key table (`keys`) against the
+    /// user's own Zellij keybinds, and records anything that can never
+    /// reach copy mode as a result.
+    ///
+    /// Interception (`InterceptInput`) only ever delivers keys that are
+    /// UNBOUND in the user's current input mode -- see `keys`' own doc
+    /// comment. So a copy-mode key the user configured, e.g.
+    /// `key_yank "Alt y"`, parses cleanly and produces no warning at load
+    /// time, yet silently does nothing at runtime if `Alt y` is *also*
+    /// bound in Zellij: the bound action fires instead, and copy mode never
+    /// even sees the keypress. Today the only way to discover that is to
+    /// press the key and notice nothing happened. This turns that into an
+    /// explicit, named report instead -- without changing what actually
+    /// happens when the key is pressed. Deliberately: zclip must not
+    /// silently second-guess a user's Zellij config (e.g. by refusing to
+    /// bind the key, or rebinding it out from under them) -- it can only
+    /// observe and report, which is all this function does.
+    ///
+    /// Returns whether this call is the one that actually ran the check and
+    /// found something to report, so the caller knows whether a redraw is
+    /// warranted.
+    fn detect_shadowed_keys(&mut self, mode_info: &ModeInfo) -> bool {
+        // Run only once per session -- see `shadow_check_done`'s doc comment
+        // for why re-running this on every `ModeUpdate` would be pure spam:
+        // `keys` is fixed at `load` time and the user's keybinds do not
+        // change while zclip is running, so there is nothing new to find on
+        // the second call, only the same warning re-appended to `status`.
+        if self.shadow_check_done {
+            return false;
+        }
+        self.shadow_check_done = true;
+
+        // Copy mode is always entered from whatever mode the user normally
+        // sits in day to day -- their `base_mode` (Normal, for almost
+        // everyone) -- never from whatever transient mode happens to be
+        // active the instant this event fires. Checking `mode_info.mode`
+        // instead would be both noisy and wrong: keys like h/j/k/l are
+        // legitimately bound in Zellij's own Pane and Resize modes without
+        // that affecting copy mode in the slightest, since copy mode is
+        // never entered *from* Pane or Resize mode.
+        let base_mode = mode_info.base_mode.unwrap_or(mode_info.mode);
+        let bound = mode_info.get_keybinds_for_mode(base_mode);
+
+        // Collected separately so the `Esc`/`Cancel` case -- the one that
+        // can trap the keyboard -- can be surfaced first and unmistakably,
+        // rather than buried alphabetically among ordinary shadowed keys.
+        let mut critical = Vec::new();
+        let mut ordinary = Vec::new();
+
+        for (key, action) in &self.keys {
+            let Some((_, zellij_actions)) = bound.iter().find(|(bound_key, _)| bound_key == key)
+            else {
+                continue;
+            };
+            // `KeyWithModifier`'s `PartialEq` is the same normalising
+            // comparison the copy-mode key table itself relies on (see
+            // `handle_copy_mode_key`'s doc comment), so `V` and `v` are
+            // correctly treated as distinct here too.
+            let Some(zellij_action) = zellij_actions.first() else {
+                // A key with no actions bound to it cannot shadow anything;
+                // nothing for the user to be told about.
+                continue;
+            };
+
+            let action_word = action_name(*action).unwrap_or("?");
+            let message = format!(
+                "{key} -> {action_word} is bound in Zellij ({zellij_action:?}) and will never reach copy mode"
+            );
+
+            if *action == CopyModeAction::Cancel {
+                // `Esc` (or whatever else resolves to `Cancel`) is the
+                // escape hatch `load` guarantees exists precisely because
+                // copy mode holds the keyboard via `InterceptInput`. If
+                // Zellij has claimed that exact key for itself, copy mode
+                // has NO way out at all once entered -- a trapped keyboard,
+                // not merely a misconfigured key -- so this must not read
+                // as just one more line in an ordinary list.
+                critical.push(format!("** TRAPPED KEYBOARD ** {message}"));
+            } else {
+                ordinary.push(message);
+            }
+        }
+
+        critical.append(&mut ordinary);
+        self.shadowed_keys = critical;
+
+        if self.shadowed_keys.is_empty() {
+            return false;
+        }
+
+        // Composed onto `status` the same way `load`'s own keymap warnings
+        // are (see the end of `load`): a short pointer here, the full detail
+        // in the buffer-list view, since the status line has no room for
+        // more than a count. The trapped-keyboard case gets its own,
+        // unmissable half of the summary rather than being folded into the
+        // count -- a user skimming the status line must not be able to miss
+        // it the way they could miss one bullet in a list.
+        let has_trapped_keyboard = self
+            .shadowed_keys
+            .iter()
+            .any(|entry| entry.starts_with("** TRAPPED KEYBOARD **"));
+        let summary = format!(
+            "{} copy-mode key(s) shadowed by your Zellij keybinds -- see the list view",
+            self.shadowed_keys.len()
+        );
+        let summary = if has_trapped_keyboard {
+            format!("** cancel key is shadowed, copy mode may trap your keyboard ** {summary}")
+        } else {
+            summary
+        };
+        self.status = Some(match self.status.take() {
+            Some(existing) => format!("{existing}; {summary}"),
+            None => summary,
+        });
+
+        true
     }
 }
 
@@ -736,6 +898,12 @@ impl ZellijPlugin for Zclip {
             EventType::Key,
             EventType::InterceptedKeyPress,
             EventType::BeforeClose,
+            // Needed only for the `keybinds`/`base_mode` fields it carries,
+            // to cross-check the copy-mode key table against the user's own
+            // Zellij keybinds -- see `detect_shadowed_keys`. Requires no new
+            // permission: `ReadApplicationState` (already requested above
+            // for `PaneUpdate`) is what gates this event too.
+            EventType::ModeUpdate,
         ]);
     }
 
@@ -749,6 +917,14 @@ impl ZellijPlugin for Zclip {
                 // there is nothing to redraw.
                 self.track_focused_pane(&manifest);
                 false
+            }
+            Event::ModeUpdate(mode_info) => {
+                // Cross-check the copy-mode key table against the user's
+                // Zellij keybinds now that we finally know them. See
+                // `detect_shadowed_keys` for why this only runs once, and
+                // why it checks `base_mode` rather than whatever mode this
+                // particular event happens to report.
+                self.detect_shadowed_keys(&mode_info)
             }
             Event::Key(key) => {
                 if !self.ready() {
