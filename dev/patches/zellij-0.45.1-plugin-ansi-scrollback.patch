@@ -1,0 +1,175 @@
+diff -ruN a/zellij-server/src/plugins/zellij_exports.rs b/zellij-server/src/plugins/zellij_exports.rs
+--- a/zellij-server/src/plugins/zellij_exports.rs	2026-09-11 10:50:57.928202716 +0000
++++ b/zellij-server/src/plugins/zellij_exports.rs	2026-09-11 10:51:54.360564175 +0000
+@@ -500,7 +500,8 @@
+                     PluginCommand::GetPaneScrollback {
+                         pane_id,
+                         get_full_scrollback,
+-                    } => get_pane_scrollback(env, pane_id.into(), get_full_scrollback),
++                        with_ansi,
++                    } => get_pane_scrollback(env, pane_id.into(), get_full_scrollback, with_ansi),
+                     PluginCommand::WriteToPaneId(bytes, pane_id) => {
+                         write_to_pane_id(env, bytes, pane_id.into())
+                     },
+@@ -4132,7 +4133,12 @@
+         ));
+ }
+ 
+-fn get_pane_scrollback(env: &PluginEnv, pane_id: PaneId, get_full_scrollback: bool) {
++fn get_pane_scrollback(
++    env: &PluginEnv,
++    pane_id: PaneId,
++    get_full_scrollback: bool,
++    with_ansi: bool,
++) {
+     use crossbeam::channel::RecvTimeoutError;
+     use std::time::Duration;
+ 
+@@ -4153,6 +4159,7 @@
+             pane_id,
+             client_id: env.client_id,
+             get_full_scrollback,
++            with_ansi,
+             response_channel: response_sender,
+         })
+         .with_context(err_context)
+diff -ruN a/zellij-server/src/screen.rs b/zellij-server/src/screen.rs
+--- a/zellij-server/src/screen.rs	2026-09-11 10:50:57.916201355 +0000
++++ b/zellij-server/src/screen.rs	2026-09-11 10:52:11.341930843 +0000
+@@ -446,6 +446,7 @@
+         pane_id: PaneId,
+         client_id: ClientId,
+         get_full_scrollback: bool,
++        with_ansi: bool,
+         response_channel: crossbeam::channel::Sender<PaneScrollbackResponse>,
+     },
+     ScrollUp(ClientId, Option<NotificationEnd>),
+@@ -9188,13 +9189,17 @@
+                 pane_id,
+                 client_id,
+                 get_full_scrollback,
++                with_ansi,
+                 response_channel,
+             } => {
+                 let mut pane_contents: Option<PaneContents> = None;
+                 for tab in screen.get_tabs_mut().values() {
+                     if let Some(pane) = tab.get_pane_with_id(pane_id) {
+-                        pane_contents =
+-                            Some(pane.pane_contents(Some(client_id), get_full_scrollback, None));
++                        pane_contents = Some(if with_ansi {
++                            pane.pane_contents_with_ansi(Some(client_id), get_full_scrollback, None)
++                        } else {
++                            pane.pane_contents(Some(client_id), get_full_scrollback, None)
++                        });
+                         break;
+                     }
+                 }
+diff -ruN a/zellij-tile/src/shim.rs b/zellij-tile/src/shim.rs
+--- a/zellij-tile/src/shim.rs	2026-09-11 10:50:57.904199994 +0000
++++ b/zellij-tile/src/shim.rs	2026-09-11 10:51:41.235545150 +0000
+@@ -1891,9 +1891,42 @@
+     pane_id: PaneId,
+     get_full_scrollback: bool,
+ ) -> Result<PaneContents, String> {
++    get_pane_scrollback_impl(pane_id, get_full_scrollback, false)
++}
++
++/// Retrieves the scrollback contents from the specified pane, styled with the same SGR (ANSI
++/// color/attribute) escape sequences that are used to render the pane on screen.
++///
++/// This is otherwise identical to [`get_pane_scrollback`], but the returned lines are not plain
++/// text: they are interspersed with ANSI escape sequences (e.g. `\x1b[1;32m`) that carry the
++/// pane's colors and text attributes. Callers that need to do column-based arithmetic on the
++/// returned lines (eg. to find the Nth visible character, wrap at a given width, or compare
++/// against plain text) must first strip these escape sequences or otherwise account for them, as
++/// they do not correspond to visible columns.
++///
++/// # Arguments
++/// * `pane_id` - The ID of the pane to get scrollback from
++/// * `get_full_scrollback` - Whether to retrieve the full scrollback buffer (including lines above and below viewport)
++///
++/// # Returns
++/// * `Ok(PaneContents)` - The styled pane contents if successful
++/// * `Err(String)` - An error message if the pane was not found, timed out, or another error occurred
++pub fn get_pane_scrollback_with_ansi(
++    pane_id: PaneId,
++    get_full_scrollback: bool,
++) -> Result<PaneContents, String> {
++    get_pane_scrollback_impl(pane_id, get_full_scrollback, true)
++}
++
++fn get_pane_scrollback_impl(
++    pane_id: PaneId,
++    get_full_scrollback: bool,
++    with_ansi: bool,
++) -> Result<PaneContents, String> {
+     let plugin_command = PluginCommand::GetPaneScrollback {
+         pane_id,
+         get_full_scrollback,
++        with_ansi,
+     };
+     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+     object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+diff -ruN a/zellij-utils/assets/prost/api.plugin_command.rs b/zellij-utils/assets/prost/api.plugin_command.rs
+--- a/zellij-utils/assets/prost/api.plugin_command.rs	2026-09-11 10:50:57.892198634 +0000
++++ b/zellij-utils/assets/prost/api.plugin_command.rs	2026-09-11 10:51:08.465041399 +0000
+@@ -1118,6 +1118,8 @@
+     pub pane_id: ::core::option::Option<PaneId>,
+     #[prost(bool, tag="2")]
+     pub get_full_scrollback: bool,
++    #[prost(bool, tag="3")]
++    pub with_ansi: bool,
+ }
+ #[allow(clippy::derive_partial_eq_without_eq)]
+ #[derive(Clone, PartialEq, ::prost::Message)]
+diff -ruN a/zellij-utils/src/data.rs b/zellij-utils/src/data.rs
+--- a/zellij-utils/src/data.rs	2026-09-11 10:50:57.884197726 +0000
++++ b/zellij-utils/src/data.rs	2026-09-11 10:51:24.186141242 +0000
+@@ -3534,6 +3534,7 @@
+     GetPaneScrollback {
+         pane_id: PaneId,
+         get_full_scrollback: bool,
++        with_ansi: bool,
+     },
+     WriteToPaneId(Vec<u8>, PaneId),
+     WriteCharsToPaneId(String, PaneId),
+diff -ruN a/zellij-utils/src/plugin_api/plugin_command.proto b/zellij-utils/src/plugin_api/plugin_command.proto
+--- a/zellij-utils/src/plugin_api/plugin_command.proto	2026-09-11 10:50:57.864195458 +0000
++++ b/zellij-utils/src/plugin_api/plugin_command.proto	2026-09-11 10:51:03.232675529 +0000
+@@ -889,6 +889,10 @@
+ message GetPaneScrollbackPayload {
+   PaneId pane_id = 1;
+   bool get_full_scrollback = 2;
++  // When true, returned lines are styled with SGR escape sequences instead
++  // of being plain text. Older callers that omit this field decode it as
++  // false, preserving today's plain-text behaviour.
++  bool with_ansi = 3;
+ }
+ 
+ message ShowCursorPayload {
+diff -ruN a/zellij-utils/src/plugin_api/plugin_command.rs b/zellij-utils/src/plugin_api/plugin_command.rs
+--- a/zellij-utils/src/plugin_api/plugin_command.rs	2026-09-11 10:50:57.876196819 +0000
++++ b/zellij-utils/src/plugin_api/plugin_command.rs	2026-09-11 10:51:19.693809429 +0000
+@@ -1646,6 +1646,7 @@
+                         Some(pane_id) => Ok(PluginCommand::GetPaneScrollback {
+                             pane_id: pane_id.try_into()?,
+                             get_full_scrollback: get_pane_scrollback_payload.get_full_scrollback,
++                            with_ansi: get_pane_scrollback_payload.with_ansi,
+                         }),
+                         _ => Err("Malformed get_pane_scrollback_payload"),
+                     }
+@@ -3535,12 +3536,14 @@
+             PluginCommand::GetPaneScrollback {
+                 pane_id,
+                 get_full_scrollback,
++                with_ansi,
+             } => Ok(ProtobufPluginCommand {
+                 name: CommandName::GetPaneScrollback as i32,
+                 payload: Some(Payload::GetPaneScrollbackPayload(
+                     GetPaneScrollbackPayload {
+                         pane_id: Some(pane_id.try_into()?),
+                         get_full_scrollback,
++                        with_ansi,
+                     },
+                 )),
+             }),
