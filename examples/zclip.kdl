@@ -117,6 +117,19 @@ keybinds {
         // NB: tmux's `prefix [` is deliberately NOT reproduced literally.
         // In a terminal, Ctrl+[ *is* the Escape byte (0x1b), so binding it
         // would make Escape unusable. Alt-based bindings avoid that entirely.
+        //
+        // Pressing this a SECOND time, while copy mode is already open,
+        // yanks the selection and leaves -- so one key both starts and
+        // finishes the job. `y` (or whatever `key_yank` is set to) still
+        // works too; this is an additional way in, not a replacement.
+        //
+        // Note this cannot be expressed as `key_yank "Alt y"` in the keymap
+        // block above, and the reason is structural: this binding is a
+        // Zellij keybinding, and copy mode's interception only ever receives
+        // keys that are UNBOUND in Zellij. A bound key like `Alt y` is
+        // resolved by Zellij into this very MessagePlugin action and
+        // arrives as a pipe, never as a keypress -- so the repeat is handled
+        // where it lands, in the plugin's pipe handler.
         bind "Alt y" { MessagePlugin "zclip" { name "copy_mode"; }; }
 
         // Leave copy mode. Escape also works from inside copy mode.

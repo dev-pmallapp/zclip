@@ -849,6 +849,28 @@ impl ZellijPlugin for Zclip {
                 true
             }
             "copy_mode" => {
+                // A second press of the entry binding yanks and leaves, so the
+                // one key both opens copy mode and closes it with the
+                // selection taken -- the emacs-ish symmetry of hitting the
+                // same key to finish what it started.
+                //
+                // This has to live here rather than in the copy-mode key
+                // table, and that is forced rather than stylistic: the entry
+                // binding is necessarily a Zellij keybinding (nothing else can
+                // reach a hidden plugin), and interception only ever delivers
+                // keys that are UNBOUND in the current input mode. So the
+                // second press cannot arrive as `InterceptedKeyPress` the way
+                // `y` does -- it arrives right back here as another pipe. See
+                // issue #29.
+                //
+                // `yank_selection` handles an empty selection itself, with an
+                // explanatory status and without exiting, so a stray
+                // double-press is harmless rather than destructive.
+                if self.copy_mode.is_active() {
+                    self.yank_selection(false);
+                    return true;
+                }
+
                 // Resolve the target BEFORE anything else: focusing ourselves
                 // (or swapping ourselves into a pane) makes the host report
                 // zclip as the focused pane, losing the very pane the user
