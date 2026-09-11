@@ -838,7 +838,14 @@ impl ZellijPlugin for Zclip {
 /// which happens routinely in block selection over ragged lines.
 fn highlight(line: &str, start: usize, end: usize) -> String {
     const REVERSE: &str = "\u{1b}[7m";
-    const RESET: &str = "\u{1b}[0m";
+    // Reverse-video OFF (SGR 27), not a full reset (SGR 0). The distinction
+    // is invisible today because `get_pane_scrollback` hands us colour-stripped
+    // text, so there is no styling for a reset to destroy -- but SGR 0 would
+    // clobber the line's own colours the moment we can capture them, turning
+    // everything after a selection monochrome. tmux highlights a selection by
+    // toggling reverse video over whatever attributes the cell already has,
+    // and this is that same primitive.
+    const REVERSE_OFF: &str = "\u{1b}[27m";
 
     let chars: Vec<char> = line.chars().collect();
     if chars.is_empty() || start >= chars.len() {
@@ -849,7 +856,7 @@ fn highlight(line: &str, start: usize, end: usize) -> String {
     let before: String = chars[..start].iter().collect();
     let selected: String = chars[start..=end].iter().collect();
     let after: String = chars[end + 1..].iter().collect();
-    format!("{before}{REVERSE}{selected}{RESET}{after}")
+    format!("{before}{REVERSE}{selected}{REVERSE_OFF}{after}")
 }
 
 register_plugin!(Zclip);
