@@ -9,11 +9,13 @@
 //! crate can only be meaningfully built for `wasm32-wasip1`, because linking it
 //! natively drags in the whole of `zellij-utils` (curl, openssl, tokio, …).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::str::FromStr;
 
 use zclip_core::{
-    apply_motion, parse_buffer_limit, BufferRing, CopyMode, Cursor, Motion, PermissionState,
-    Scrollback, SelectionMode, DEFAULT_BUFFER_LIMIT,
+    action_name, apply_motion, parse_buffer_limit, resolve_keymap, split_key_spec, BufferRing,
+    CopyMode, CopyModeAction, Cursor, PermissionState, Scrollback, SelectionMode,
+    DEFAULT_BUFFER_LIMIT,
 };
 use zellij_tile::prelude::*;
 
@@ -34,9 +36,17 @@ use zellij_tile::prelude::*;
 ///   and swap it back out again on exit. See `enter_copy_mode` /
 ///   `exit_copy_mode`.
 ///
+/// - `WriteToClipboard` — `copy_to_clipboard`, backing the `yank_clipboard`
+///   copy-mode action. Note this is *not* the same capability as shelling out
+///   to `xclip`/`wl-copy`: `copy_to_clipboard` hands the text to Zellij, which
+///   writes it wherever the user's own `copy_command`/`copy_clipboard` config
+///   already points. That is why zclip can reach the system clipboard without
+///   `RunCommands`, and why it inherits a working clipboard setup instead of
+///   second-guessing one.
+///
 /// Capabilities for later milestones are deliberately *not* requested, so users
-/// are not asked to approve something zclip cannot yet do:
-/// `WriteToClipboard` / `RunCommands` (clipboard bridge, M3), `ReadCliPipes`
+/// are not asked to approve something zclip cannot yet do: `RunCommands`
+/// (shell-out clipboard backends and OSC 52 fallback, M3), `ReadCliPipes`
 /// (`zellij pipe`, M5).
 const REQUIRED_PERMISSIONS: &[PermissionType] = &[
     PermissionType::ReadApplicationState,
@@ -44,6 +54,7 @@ const REQUIRED_PERMISSIONS: &[PermissionType] = &[
     PermissionType::WriteToStdin,
     PermissionType::InterceptInput,
     PermissionType::ChangeApplicationState,
+    PermissionType::WriteToClipboard,
 ];
 
 /// How many characters of a buffer to show per row in the list.
@@ -103,6 +114,23 @@ pub struct Zclip {
     /// value rather than a guess; it is refreshed on every render, so it can
     /// only be stale for the single keypress following a resize.
     last_render_height: usize,
+    /// The resolved copy-mode key table: which [`KeyWithModifier`] does which
+    /// [`CopyModeAction`].
+    ///
+    /// Built ONCE, in `load`, from `zclip-core`'s [`resolve_keymap`] plus this
+    /// crate's own `KeyWithModifier::from_str` parsing -- not derived from
+    /// Zellij's own `keybinds` block. It cannot be: interception
+    /// (`InterceptInput`) only ever delivers keys that are UNBOUND in the
+    /// user's current input mode, so a key bound in `keybinds` never reaches
+    /// here to be matched against; and `InputMode` is a fixed, closed enum
+    /// with no "copy mode" variant a plugin could scope bindings to, so there
+    /// is nowhere Zellij-side to hang a copy-mode-only table even if the first
+    /// problem did not exist. See issue #29 for the full argument. A
+    /// `HashMap` is safe here despite `Char('V')` and `Char('v')` needing to
+    /// stay distinct keys, because `KeyWithModifier`'s `Hash` normalises an
+    /// uppercase `Char` to lowercase-plus-`Shift` exactly the way its `Eq`
+    /// does, so the two never collide.
+    keys: HashMap<KeyWithModifier, CopyModeAction>,
 }
 
 impl Zclip {
@@ -257,59 +285,20 @@ impl Zclip {
         }
     }
 
-    /// Maps a key to a cursor motion, vi-style.
-    ///
-    /// Returns `None` for keys that are not motions, which the caller treats as
-    /// "not handled" so they can be routed elsewhere (e.g. exit).
-    fn motion_for(key: &KeyWithModifier) -> Option<Motion> {
-        let ctrl = key.key_modifiers.contains(&KeyModifier::Ctrl);
-
-        let motion = match (&key.bare_key, ctrl) {
-            // Paging. Checked before the plain-character arm so that Ctrl-d
-            // is a half-page down rather than the literal character 'd'.
-            (BareKey::Char('u'), true) => Motion::HalfPageUp,
-            (BareKey::Char('d'), true) => Motion::HalfPageDown,
-            // Zellij's default config binds `Ctrl b` to `SwitchToMode
-            // "Tmux"`, so this arm is unreachable under default keybinds --
-            // Zellij resolves the bound key before the intercept ever sees
-            // it. `PageUp` (below) is the working alternative; a user who
-            // wants the vi key back can `unbind "Ctrl b"` in their config.
-            (BareKey::Char('b'), true) => Motion::PageUp,
-            (BareKey::Char('f'), true) => Motion::PageDown,
-            (_, true) => return None,
-
-            (BareKey::Char('h'), _) | (BareKey::Left, _) => Motion::Left,
-            (BareKey::Char('j'), _) | (BareKey::Down, _) => Motion::Down,
-            (BareKey::Char('k'), _) | (BareKey::Up, _) => Motion::Up,
-            (BareKey::Char('l'), _) | (BareKey::Right, _) => Motion::Right,
-
-            (BareKey::Char('0'), _) | (BareKey::Home, _) => Motion::LineStart,
-            (BareKey::Char('^'), _) => Motion::LineFirstNonBlank,
-            (BareKey::Char('$'), _) | (BareKey::End, _) => Motion::LineEnd,
-
-            (BareKey::Char('w'), _) => Motion::WordForward,
-            (BareKey::Char('b'), _) => Motion::WordBackward,
-            (BareKey::Char('e'), _) => Motion::WordEnd,
-
-            // Single `g` rather than vi's `gg`: a two-key sequence needs a
-            // pending-input state machine, which belongs with operators
-            // (#18) rather than being half-built here.
-            (BareKey::Char('g'), _) => Motion::Top,
-            (BareKey::Char('G'), _) => Motion::Bottom,
-
-            (BareKey::PageUp, _) => Motion::PageUp,
-            (BareKey::PageDown, _) => Motion::PageDown,
-
-            _ => return None,
-        };
-        Some(motion)
-    }
-
-    /// Yanks the current selection into the ring and leaves copy mode.
+    /// Yanks the current selection into the ring and leaves copy mode,
+    /// optionally also placing it on the system clipboard.
     ///
     /// Yanking with no active selection is a no-op with an explanation rather
     /// than silently exiting, which would look like the keypress was lost.
-    fn yank_selection(&mut self) {
+    ///
+    /// `to_clipboard` distinguishes the two yank actions. Both write the ring;
+    /// the clipboard is strictly additional, never instead of it (see
+    /// [`CopyModeAction::YankToClipboard`]). The clipboard write is deliberately
+    /// gated on the ring having accepted the text, so the two destinations can
+    /// never disagree about what was yanked -- in particular a selection of
+    /// nothing but padding, which the ring rejects as blank, must not silently
+    /// clobber whatever the user already had on their clipboard.
+    fn yank_selection(&mut self, to_clipboard: bool) {
         let Some(session) = self.copy_mode.session() else {
             return;
         };
@@ -324,11 +313,21 @@ impl Zclip {
         let lines = text.lines().count();
 
         // The ring rejects blank text, so selecting only padding yanks nothing.
-        match self.ring.push(text) {
+        match self.ring.push(text.as_str()) {
             Some(_) => {
+                if to_clipboard {
+                    // Routes through Zellij's own configured clipboard
+                    // destination rather than shelling out -- see
+                    // REQUIRED_PERMISSIONS' note on WriteToClipboard. There is
+                    // no result to check: the host takes the text and reports
+                    // nothing back, so a misconfigured `copy_command` on the
+                    // user's side fails silently here by construction.
+                    copy_to_clipboard(&text);
+                }
                 self.exit_copy_mode();
+                let destination = if to_clipboard { " + clipboard" } else { "" };
                 self.status = Some(format!(
-                    "yanked {lines} line(s) — {} in ring",
+                    "yanked {lines} line(s) — {} in ring{destination}",
                     self.ring.len()
                 ));
             }
@@ -337,46 +336,55 @@ impl Zclip {
     }
 
     /// Handles a key delivered to copy mode, whether intercepted or not.
+    ///
+    /// Interception only ever delivers keys that are UNBOUND in the user's
+    /// current input mode -- Zellij resolves bound keys to their action
+    /// before the intercept is consulted, so a user's `cancel` binding still
+    /// fires and works during copy mode even though it never reaches this
+    /// function. `Esc` typically DOES reach here, because it is unbound in
+    /// Normal mode by default -- but that is no longer special-cased below;
+    /// it is just whatever the table says `Esc` does, same as every other
+    /// key. `load` guarantees some key maps to `Cancel` (reinstating `Esc`
+    /// if nothing else does), so the escape hatch survives regardless.
+    ///
+    /// This table lookup also fixes a latent bug the old hardcoded
+    /// `(BareKey::Char('V'), false)` arm had: some terminals report an
+    /// uppercase letter as the *lowercase* `BareKey::Char` plus a `Shift`
+    /// modifier rather than as the uppercase char itself, which that arm's
+    /// exact-match would miss entirely -- falling through and being treated
+    /// as plain `v` (char-wise selection) instead of `V` (line-wise).
+    /// `KeyWithModifier`'s `PartialEq`/`Hash` normalise both spellings of
+    /// `V` to the same value, so the table gets this right where the old
+    /// `match` could not.
     fn handle_copy_mode_key(&mut self, key: &KeyWithModifier) -> bool {
-        let ctrl = key.key_modifiers.contains(&KeyModifier::Ctrl);
-
-        // Interception only ever delivers keys that are UNBOUND in the user's
-        // current input mode -- Zellij resolves bound keys to their action
-        // before the intercept is consulted, so a user's `cancel` binding
-        // still fires and works during copy mode. `Esc` is handled here
-        // because, under the default config, `Esc` is unbound in Normal mode
-        // and therefore reaches the plugin as an intercepted key rather than
-        // an action -- nothing else can act on it, so copy mode has to.
-        if key.bare_key == BareKey::Esc {
-            // Escape backs out one level at a time, as in vi: it drops an
-            // active selection first and only leaves copy mode once there is
-            // nothing left to cancel. Exiting outright would discard a
-            // painstakingly made selection on a single mis-keypress.
-            let had_selection = self
-                .copy_mode
-                .session()
-                .is_some_and(zclip_core::CopySession::has_selection);
-            if had_selection {
-                if let Some(session) = self.copy_mode.session_mut() {
-                    session.clear_selection();
-                }
-                self.status = Some("selection cleared".into());
-            } else {
-                self.exit_copy_mode();
-            }
-            return true;
-        }
-
-        // Selection shape. `Ctrl-v` is checked before the motion table so it
-        // is not read as the `v` character.
-        let selection_mode = match (&key.bare_key, ctrl) {
-            (BareKey::Char('v'), true) => Some(SelectionMode::Block),
-            (BareKey::Char('v'), false) => Some(SelectionMode::Char),
-            (BareKey::Char('V'), false) => Some(SelectionMode::Line),
-            _ => None,
+        let Some(action) = self.keys.get(key).copied() else {
+            return false;
         };
-        if let Some(mode) = selection_mode {
-            if let Some(session) = self.copy_mode.session_mut() {
+
+        match action {
+            CopyModeAction::Cancel => {
+                // Back out one level at a time, as in vi: drop an active
+                // selection first and only leave copy mode once there is
+                // nothing left to cancel. Exiting outright would discard a
+                // painstakingly made selection on a single mis-keypress.
+                let had_selection = self
+                    .copy_mode
+                    .session()
+                    .is_some_and(zclip_core::CopySession::has_selection);
+                if had_selection {
+                    if let Some(session) = self.copy_mode.session_mut() {
+                        session.clear_selection();
+                    }
+                    self.status = Some("selection cleared".into());
+                } else {
+                    self.exit_copy_mode();
+                }
+                true
+            }
+            CopyModeAction::Select(mode) => {
+                let Some(session) = self.copy_mode.session_mut() else {
+                    return false;
+                };
                 // Pressing the same shape twice cancels, as in vi.
                 session.toggle_selection(mode);
                 self.status = Some(if session.has_selection() {
@@ -388,30 +396,33 @@ impl Zclip {
                 } else {
                     String::from("selection cleared")
                 });
+                true
             }
-            return true;
+            CopyModeAction::Yank => {
+                // Handles the empty-selection case itself, with an
+                // explanatory status, rather than exiting -- see its own doc
+                // comment.
+                self.yank_selection(false);
+                true
+            }
+            CopyModeAction::YankToClipboard => {
+                self.yank_selection(true);
+                true
+            }
+            CopyModeAction::Motion(motion) => {
+                let Some(session) = self.copy_mode.session_mut() else {
+                    return false;
+                };
+                let next = apply_motion(
+                    motion,
+                    session.scrollback(),
+                    session.cursor(),
+                    self.last_render_height,
+                );
+                session.set_cursor(next);
+                true
+            }
         }
-
-        if !ctrl && key.bare_key == BareKey::Char('y') {
-            self.yank_selection();
-            return true;
-        }
-
-        let Some(motion) = Self::motion_for(key) else {
-            return false;
-        };
-        let Some(session) = self.copy_mode.session_mut() else {
-            return false;
-        };
-
-        let next = apply_motion(
-            motion,
-            session.scrollback(),
-            session.cursor(),
-            self.last_render_height,
-        );
-        session.set_cursor(next);
-        true
     }
 
     /// Captures the current selection in the target pane into the ring.
@@ -657,6 +668,66 @@ impl ZellijPlugin for Zclip {
         // would otherwise treat the window as zero-height and step one line.
         self.last_render_height = PROVISIONAL_HEIGHT;
         self.own_plugin_id = Some(get_plugin_ids().plugin_id);
+
+        // `zclip-core` resolves presets and `key_*` overrides into
+        // (action, raw key-spec) pairs -- it has no `zellij-tile` dependency,
+        // so it cannot itself know what a `KeyWithModifier` is. Turning those
+        // strings into real keys, and warning about the ones that do not
+        // parse, is this crate's half of the job.
+        let (bindings, mut keymap_warnings) = resolve_keymap(&self.config);
+        for (action, spec) in bindings {
+            let spec = spec.trim();
+            // Try the whole value as ONE key first. This is what keeps a
+            // literal comma bindable (`key_word_forward = ","`): splitting
+            // unconditionally would turn that single-key spec into two empty
+            // parts instead of the comma key itself. Only fall back to
+            // splitting on commas if the whole-value parse fails -- see
+            // `split_key_spec`'s doc comment for why this order matters.
+            if let Ok(key) = KeyWithModifier::from_str(spec) {
+                self.keys.insert(key, action);
+                continue;
+            }
+            for part in split_key_spec(spec) {
+                match KeyWithModifier::from_str(&part) {
+                    Ok(key) => {
+                        self.keys.insert(key, action);
+                    }
+                    Err(_) => keymap_warnings.push(format!(
+                        "could not parse key '{part}' for action '{}', ignoring",
+                        action_name(action).unwrap_or("?")
+                    )),
+                }
+            }
+        }
+
+        // Copy mode holds the keyboard via `intercept_key_presses` -- a table
+        // with no working `Cancel` binding is a trapped keyboard, not a
+        // cosmetic mistake. Guarantee an escape hatch regardless of what the
+        // config says, exactly as issue #29 requires.
+        if !self
+            .keys
+            .values()
+            .any(|action| *action == CopyModeAction::Cancel)
+        {
+            self.keys.insert(
+                KeyWithModifier::from_str("Esc").expect("\"Esc\" is a valid key spec"),
+                CopyModeAction::Cancel,
+            );
+            keymap_warnings.push(
+                "no working 'cancel' binding in the resolved keymap -- reinstated Esc".into(),
+            );
+        }
+
+        // Surfaced the same way `buffer_limit` errors already are, via
+        // `self.status`: a malformed key table must degrade, not prevent
+        // startup.
+        if !keymap_warnings.is_empty() {
+            let joined = keymap_warnings.join("; ");
+            self.status = Some(match self.status.take() {
+                Some(existing) => format!("{existing}; {joined}"),
+                None => joined,
+            });
+        }
 
         request_permission(REQUIRED_PERMISSIONS);
         subscribe(&[

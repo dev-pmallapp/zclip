@@ -13,6 +13,7 @@
 
 pub mod buffer;
 pub mod copy_mode;
+pub mod keymap;
 pub mod motion;
 pub mod permissions;
 pub mod region;
@@ -23,6 +24,10 @@ pub use buffer::{
     parse_buffer_limit, BufferId, BufferLimitError, BufferRing, PasteBuffer, DEFAULT_BUFFER_LIMIT,
 };
 pub use copy_mode::{CopyMode, CopySession};
+pub use keymap::{
+    action_by_name, action_name, resolve_keymap, split_key_spec, CopyModeAction, EMACS_PRESET,
+    VI_PRESET,
+};
 pub use motion::{apply as apply_motion, Motion};
 pub use permissions::PermissionState;
 pub use region::{extract_region, selected_columns, SelectionMode};

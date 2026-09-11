@@ -11,6 +11,74 @@ plugins {
         // Maximum number of *unnamed* buffers kept. Named buffers are pinned
         // and never count toward this limit, matching tmux's buffer-limit.
         buffer_limit "50"
+
+        // --- Copy-mode key table -------------------------------------------
+        //
+        // This is a SEPARATE key table from the `keybinds` block below: it is
+        // resolved once, at plugin load, from this config block alone. It
+        // CANNOT be expressed as ordinary Zellij `keybinds`, for two reasons
+        // (see issue #29 for the full argument):
+        //
+        //   1. Interception (`InterceptInput`) only ever delivers keys that
+        //      are UNBOUND in your current Zellij input mode. A key you bind
+        //      in `keybinds` is resolved to its bound action before the
+        //      intercept layer is ever consulted, so copy mode would simply
+        //      never see it -- the opposite of what a key table needs.
+        //   2. Zellij's `InputMode` is a fixed, closed enum; there is no
+        //      "copy mode" mode a plugin could scope bindings to. Binding a
+        //      letter under `normal` would hijack it everywhere, all the
+        //      time, not just while copy mode is open.
+        //
+        // WARNING: because of (1) above, any key you already have bound in
+        // `keybinds` (below, or elsewhere in your config) can NEVER reach
+        // copy mode, no matter what you write here -- pick key_* overrides
+        // that are unbound in your normal input mode. `Ctrl b` is a concrete
+        // example: Zellij's own default config binds it to
+        // `SwitchToMode "Tmux"`, so the vi preset's `Ctrl b` page-up entry
+        // (kept below for completeness) is shadowed and never fires unless
+        // you `unbind "Ctrl b"` yourself; `PageUp` is the working default.
+        //
+        // `keymap` selects a whole preset. "vi" is the default (used when
+        // `keymap` is absent); "emacs" is also built in.
+        // keymap "vi"
+
+        // `key_<action>` overrides a single action's binding, REPLACING its
+        // preset spec entirely rather than adding to it -- so, e.g., setting
+        // `key_yank` below stops `y` from yanking; only `Y` would.
+        // A value may name more than one key, comma-separated
+        // ("y, Enter" binds both keys to the same action). Resolution tries
+        // the whole value as ONE key first, and only splits on commas if
+        // that fails -- which is what keeps a literal comma bindable
+        // (`key_word_forward ","` binds the character `,` itself, it does
+        // not fail to parse and fall through to a split).
+        //
+        // key_yank "Y"
+        // key_cancel "Ctrl g, Esc"
+
+        // The full action-name vocabulary, one `key_*` entry per name, valid
+        // for either preset:
+        //   left, down, up, right,
+        //   word_forward, word_backward, word_end,
+        //   line_start, line_first_non_blank, line_end,
+        //   top, bottom,
+        //   half_page_up, half_page_down, page_up, page_down,
+        //   select_char, select_line, select_block,
+        //   yank, cancel
+        //
+        // An unknown `keymap` value, an unknown action name after `key_`, or
+        // a value that fails to parse as a key (or a comma-separated list of
+        // keys) is a configuration mistake, not a fatal one: it produces a
+        // warning (shown in zclip's own status line) and the plugin falls
+        // back to the preset's existing binding for that action, exactly
+        // like an unparseable `buffer_limit` falls back to its default
+        // rather than refusing to start.
+        //
+        // `cancel` is special: if no working binding resolves to it at all
+        // (unset, unparseable, or overridden to a key that also fails to
+        // parse), `Esc` is reinstated regardless of what this block says.
+        // Copy mode holds your keyboard via `InterceptInput` while it is
+        // open; a key table with no way to cancel would trap it, not just
+        // misconfigure it.
     }
 }
 
