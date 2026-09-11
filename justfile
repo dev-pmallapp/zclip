@@ -46,5 +46,30 @@ watch:
 layout:
     zellij --layout dev/layout.kdl
 
+# Reproduce the release workflow's artifact locally: release build,
+# wasm-opt -Oz with the same flags CI uses, and a sha256. Handy for checking
+# the actual shipped size before pushing a tag.
+dist: build-release
+    #!/usr/bin/env bash
+    set -euo pipefail
+    in=target/wasm32-wasip1/release/zclip.wasm
+    if ! command -v wasm-opt >/dev/null 2>&1; then
+        echo "error: wasm-opt not found on PATH (install Binaryen, e.g. \`nix-shell -p binaryen\`)" >&2
+        echo "       skipping optimization; release CI requires it, this shell does not." >&2
+        exit 1
+    fi
+    before=$(stat -c%s "$in")
+    wasm-opt -Oz \
+        --enable-bulk-memory \
+        --enable-sign-ext \
+        --enable-mutable-globals \
+        --enable-nontrapping-float-to-int \
+        "$in" -o zclip.wasm
+    after=$(stat -c%s zclip.wasm)
+    sha256sum zclip.wasm > zclip.wasm.sha256
+    echo "size before wasm-opt: $before bytes"
+    echo "size after wasm-opt:  $after bytes"
+    cat zclip.wasm.sha256
+
 clean:
     cargo clean

@@ -94,3 +94,41 @@ need for wasm development. Always scope commands explicitly:
 
 - `-p zclip-core` for native test/build/clippy.
 - `--target wasm32-wasip1` for anything involving `crates/zclip`.
+
+## Releasing
+
+There's no plugin registry for Zellij, so a release is just a GitHub
+release with a `zclip.wasm` and a checksum attached. To cut one:
+
+1. Bump `workspace.package.version` in `Cargo.toml`.
+2. Move the relevant `CHANGELOG.md` entries out of `[Unreleased]` into a new
+   `## [x.y.z]` section.
+3. Commit, then tag: `git tag vx.y.z` (the `v` prefix matters).
+4. `git push origin vx.y.z`.
+
+Pushing the tag triggers `.github/workflows/release.yml`, which builds the
+plugin for `wasm32-wasip1`, runs it through `wasm-opt -Oz`, computes a
+sha256, and attaches both `zclip.wasm` and `zclip.wasm.sha256` to a new
+GitHub release for that tag.
+
+The workflow's version guard re-derives the version from `Cargo.toml` and
+fails the run if it doesn't match the pushed tag. This is deliberate: a tag
+that disagrees with the crate version would produce an artifact that lies
+about what it is, so the workflow refuses to publish rather than let that
+happen silently.
+
+Because `zclip.wasm` is a single portable WASM binary — it's the same
+bytes regardless of the host OS or architecture — there is no per-OS/arch
+build matrix and no separate downloads to pick between. One artifact covers
+every platform Zellij itself runs on.
+
+To exercise the whole pipeline (build, optimize, checksum, upload) without
+actually publishing a release, run the workflow manually from the Actions
+tab (`workflow_dispatch`) with `dry_run` left at its default of `true`. This
+runs every step except creating the GitHub release, and still uploads the
+built `zclip.wasm`/`zclip.wasm.sha256` as a workflow artifact so you can
+download and inspect them.
+
+`just dist` reproduces the release artifact locally (release build +
+`wasm-opt -Oz` + sha256) if you want to check the shipped size before
+tagging.
