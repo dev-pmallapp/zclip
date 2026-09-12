@@ -9,3 +9,11 @@ __pycache__/
 # Editor / OS
 .DS_Store
 *.swp
+
+# Nix build symlinks (`nix build` writes these; they point into /nix/store
+# and are meaningless on any other machine).
+/result
+/result-*
+
+# direnv
+.direnv/
