@@ -16,6 +16,7 @@ pub mod copy_mode;
 pub mod keymap;
 pub mod motion;
 pub mod permissions;
+pub mod persist;
 pub mod region;
 pub mod scrollback;
 pub mod selection;
@@ -30,6 +31,7 @@ pub use keymap::{
 };
 pub use motion::{apply as apply_motion, Motion};
 pub use permissions::PermissionState;
+pub use persist::{parse_persist_mode, PersistMode};
 pub use region::{extract_region, selected_columns, SelectionMode};
 pub use scrollback::Scrollback;
 pub use selection::{extract_span, trim_trailing_blanks, Cursor};

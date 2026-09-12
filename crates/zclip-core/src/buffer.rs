@@ -21,7 +21,7 @@
 //! ring over capacity, in which case the limit is re-enforced immediately
 //! (oldest-unnamed-first) rather than waiting for the next push.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 
@@ -215,6 +215,32 @@ pub fn parse_buffer_limit(raw: &str) -> Result<usize, BufferLimitError> {
     }
 }
 
+/// One buffer's worth of data recovered from a persisted-ring file, ready
+/// to be handed to [`BufferRing::restore`].
+///
+/// Deliberately crate-private: [`crate::persist::decode`] is the only
+/// producer of these, and [`BufferRing::restore`] is the only consumer.
+/// Keeping both the type and the method out of the public API means
+/// `BufferRing`'s four private fields stay private -- no external caller
+/// can ever construct one of these and hand it to `restore` to build a
+/// ring that violates an invariant the rest of this module maintains.
+///
+/// `seq` here is advisory only, used purely to work out recency order and
+/// to break ties between duplicate names; the restored ring assigns its
+/// own fresh `seq` (and `id`) to every buffer, exactly as [`BufferRing::push`]
+/// does for a newly captured one.
+pub(crate) struct RestoredBuffer {
+    /// The buffer's `seq` as read from the file, already renumbered by
+    /// [`crate::persist::decode`] to a fresh, dense range. Used only to
+    /// order buffers and resolve duplicate names; never stored as-is.
+    pub seq: u64,
+    /// The buffer's name, if any, exactly as it will appear in the
+    /// restored ring.
+    pub name: Option<String>,
+    /// The buffer's text, exactly as it will appear in the restored ring.
+    pub text: String,
+}
+
 /// The tmux-style ring of paste buffers.
 ///
 /// Backed by a [`VecDeque`] with the most recently pushed buffer at the
@@ -252,6 +278,59 @@ impl BufferRing {
             next_id: 0,
             next_seq: 0,
         }
+    }
+
+    /// Rebuilds a ring from persisted data, re-establishing every
+    /// invariant this module maintains rather than trusting the caller
+    /// (i.e. [`crate::persist::decode`]) to have done so.
+    ///
+    /// `entries` need not already be in any particular order: this sorts
+    /// by `seq` descending to determine recency, drops blank-text entries
+    /// (the ring's own public API can never produce one, but a hand-edited
+    /// or corrupted file might), and collapses duplicate names to the
+    /// newest holder -- matching [`Self::push_named`]'s overwrite
+    /// semantics. Every surviving entry is then assigned a fresh `id` and
+    /// `seq` via the same [`Self::allocate_id`]/[`Self::allocate_seq`]
+    /// helpers [`Self::push`] uses, so `next_id`/`next_seq` end up
+    /// strictly greater than anything restored and no id is ever reused.
+    ///
+    /// Finally, `limit` -- the caller's *current* configuration, not
+    /// anything read from the file -- is applied via the real
+    /// [`Self::enforce_limit`], which evicts oldest-unnamed-first and
+    /// never touches named buffers. This can leave `len() > limit` when
+    /// named buffers are present, exactly as after any other operation on
+    /// this ring; restoring never truncates to `limit`.
+    pub(crate) fn restore(limit: usize, entries: Vec<RestoredBuffer>) -> Self {
+        let mut entries: Vec<RestoredBuffer> = entries
+            .into_iter()
+            .filter(|entry| !entry.text.trim().is_empty())
+            .collect();
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.seq));
+
+        let mut seen_names: HashSet<String> = HashSet::new();
+        entries.retain(|entry| match &entry.name {
+            Some(name) => seen_names.insert(name.clone()),
+            None => true,
+        });
+
+        let mut ring = Self::new(limit);
+        // `entries` is most-recent-first; walk it in reverse (oldest
+        // first) so that `allocate_seq` -- a plain increasing counter --
+        // assigns higher seqs to more recent buffers, matching how `push`
+        // grows `seq` over time. Pushing each to the front as we go
+        // restores the most-recent-first order at the end.
+        for entry in entries.into_iter().rev() {
+            let id = ring.allocate_id();
+            let seq = ring.allocate_seq();
+            ring.buffers.push_front(PasteBuffer {
+                id,
+                text: entry.text,
+                name: entry.name,
+                seq,
+            });
+        }
+        ring.enforce_limit();
+        ring
     }
 
     /// The maximum number of **unnamed** buffers this ring will hold.
@@ -1041,5 +1120,133 @@ mod tests {
         let mut seqs: Vec<u64> = ring.iter().map(PasteBuffer::seq).collect();
         seqs.reverse();
         assert!(seqs.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    fn restored(seq: u64, name: Option<&str>, text: &str) -> RestoredBuffer {
+        RestoredBuffer {
+            seq,
+            name: name.map(str::to_string),
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn restore_orders_entries_most_recent_first_by_seq_regardless_of_input_order() {
+        let ring = BufferRing::restore(
+            5,
+            vec![
+                restored(1, None, "oldest"),
+                restored(3, None, "newest"),
+                restored(2, None, "middle"),
+            ],
+        );
+
+        let texts: Vec<&str> = ring.iter().map(PasteBuffer::text).collect();
+        assert_eq!(texts, vec!["newest", "middle", "oldest"]);
+    }
+
+    #[test]
+    fn restore_drops_blank_text_entries() {
+        let ring =
+            BufferRing::restore(5, vec![restored(1, None, "   "), restored(2, None, "kept")]);
+
+        assert_eq!(ring.len(), 1);
+        assert_eq!(ring.get(0).unwrap().text(), "kept");
+    }
+
+    #[test]
+    fn restore_collapses_duplicate_names_to_the_highest_seq() {
+        let ring = BufferRing::restore(
+            5,
+            vec![
+                restored(1, Some("clip"), "first"),
+                restored(5, Some("clip"), "second"),
+            ],
+        );
+
+        assert_eq!(ring.len(), 1);
+        assert_eq!(ring.get_by_name("clip").unwrap().text(), "second");
+    }
+
+    #[test]
+    fn restore_assigns_fresh_unique_ids() {
+        let ring = BufferRing::restore(5, vec![restored(1, None, "a"), restored(2, None, "b")]);
+
+        let ids: Vec<BufferId> = ring.iter().map(PasteBuffer::id).collect();
+        assert_ne!(ids[0], ids[1]);
+    }
+
+    #[test]
+    fn restore_assigns_fresh_seqs_with_the_most_recent_entry_highest() {
+        let ring = BufferRing::restore(
+            5,
+            vec![restored(100, None, "newest"), restored(1, None, "oldest")],
+        );
+
+        assert!(ring.get(0).unwrap().seq() > ring.get(1).unwrap().seq());
+    }
+
+    #[test]
+    fn restore_next_id_and_next_seq_are_strictly_greater_than_anything_restored() {
+        let mut ring = BufferRing::restore(5, vec![restored(1, None, "a"), restored(2, None, "b")]);
+
+        let existing_ids: Vec<BufferId> = ring.iter().map(PasteBuffer::id).collect();
+        let existing_seqs: Vec<u64> = ring.iter().map(PasteBuffer::seq).collect();
+
+        let new_id = ring.push("c").unwrap();
+        assert!(!existing_ids.contains(&new_id));
+        assert!(!existing_seqs.contains(&ring.get(0).unwrap().seq()));
+    }
+
+    #[test]
+    fn restore_applies_the_argument_limit_evicting_oldest_unnamed_via_enforce_limit() {
+        let ring = BufferRing::restore(
+            2,
+            vec![
+                restored(1, None, "a"),
+                restored(2, None, "b"),
+                restored(3, None, "c"),
+                restored(4, None, "d"),
+            ],
+        );
+
+        assert_eq!(ring.len(), 2);
+        let texts: Vec<&str> = ring.iter().map(PasteBuffer::text).collect();
+        assert_eq!(texts, vec!["d", "c"]);
+    }
+
+    #[test]
+    fn restore_never_evicts_named_buffers_even_when_they_alone_exceed_the_limit() {
+        let ring = BufferRing::restore(
+            1,
+            vec![
+                restored(1, Some("n1"), "a"),
+                restored(2, Some("n2"), "b"),
+                restored(3, Some("n3"), "c"),
+            ],
+        );
+
+        assert_eq!(ring.len(), 3, "named buffers must never be evicted");
+    }
+
+    #[test]
+    fn restore_len_can_legitimately_exceed_limit_when_named_buffers_are_present() {
+        let ring = BufferRing::restore(
+            1,
+            vec![
+                restored(1, Some("pinned"), "keep"),
+                restored(2, None, "a"),
+                restored(3, None, "b"),
+            ],
+        );
+
+        assert_eq!(ring.len(), 2, "1 pinned + 1 unnamed within the limit of 1");
+        assert!(ring.get_by_name("pinned").is_some());
+    }
+
+    #[test]
+    fn restore_of_empty_entries_yields_an_empty_ring() {
+        let ring = BufferRing::restore(5, Vec::new());
+        assert!(ring.is_empty());
     }
 }

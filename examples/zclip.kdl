@@ -12,6 +12,14 @@ plugins {
         // and never count toward this limit, matching tmux's buffer-limit.
         buffer_limit "50"
 
+        // Persist the buffer ring across plugin reloads, closing/reopening
+        // zclip's pane, and detach/attach -- but not across ending the
+        // session or restarting Zellij, matching tmux's paste buffers. Off
+        // by default: this writes yanked text to plaintext files under
+        // ~/.cache. Read docs/persistence.md's Privacy section before
+        // turning this on, especially on a shared machine.
+        // persist "session"
+
         // --- Copy-mode key table -------------------------------------------
         //
         // This is a SEPARATE key table from the `keybinds` block below: it is

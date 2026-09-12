@@ -55,6 +55,13 @@ The workspace has two crates:
 
 New logic goes in `zclip-core` with tests; `zclip` should stay a thin shim.
 
+Buffer-ring persistence is one instance of that split: the codec
+(`crates/zclip-core/src/persist.rs`) is unit-tested natively as part of
+`zclip-core`'s hermetic suite, while the filesystem behaviour it enables —
+actually reading and writing `/cache`, surviving reloads, GC — is host glue
+in `crates/zclip` and is covered by a manual checklist instead. See
+[`docs/persistence.md`](persistence.md).
+
 ## The fast loop
 
 ```sh

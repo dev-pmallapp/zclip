@@ -22,5 +22,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Headless/background loading via `load_plugins`.
 - Plugin configuration: `buffer_limit`, `keymap`, and per-action `key_*` overrides.
 - An example KDL configuration (`examples/zclip.kdl`).
+- Opt-in, per-session persistence of the buffer ring (`persist "session"`), surviving plugin reloads and detach/attach but not the end of the Zellij session.
 - A Nix flake providing a package and a devShell.
 - A tag-triggered release workflow that builds, optimizes, and publishes `zclip.wasm`.

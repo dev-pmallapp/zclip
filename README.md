@@ -16,11 +16,11 @@ What works today:
 - Copy mode: scrollback reading, vi and emacs keymap presets, per-action `key_*` overrides, cursor motions, and char/line/block selection with reverse-video highlighting
 - A buffer list view with previews and delete/yank/paste actions
 - A pipe interface (`yank`, `paste`, `copy_mode`, `cancel`, `list`) usable from keybindings or `zellij pipe`, plus headless/background loading
+- Opt-in, per-session persistence of the buffer ring (`persist "session"`), surviving plugin reloads and detach/attach but not the Zellij session ending — see [`docs/persistence.md`](docs/persistence.md)
 - CI (fmt, clippy, tests, wasm build) and a tag-triggered release workflow
 
 Notable gaps before v0.1.0:
 
-- No persistence — the buffer ring lives in memory and is lost on plugin reload
 - No incremental search in copy mode, and no observation of copies made outside zclip
 - Clipboard integration only reaches Zellij's own configured clipboard command; there is no shell-out to `xclip`/`wl-copy`/`pbcopy`/`clip.exe` and no OSC 52 fallback
 - No fuzzy filtering or theming in the buffer list
@@ -88,7 +88,11 @@ keybinds {
 
 `Alt p` pastes into whichever pane you are currently in - you do not need to
 focus zclip first. `buffer_limit` bounds *unnamed* buffers only; named buffers
-are pinned and never evicted, as in tmux.
+are pinned and never evicted, as in tmux. `persist` (`off` by default,
+`session` to opt in) keeps the buffer ring alive across plugin reloads and
+detach/attach within a single Zellij session; see
+[`docs/persistence.md`](docs/persistence.md) for exactly what that means and
+its privacy tradeoffs before turning it on.
 
 tmux's `prefix [` is not reproduced literally: in a terminal `Ctrl+[` *is* the
 Escape byte, so binding it would break Escape.
@@ -100,7 +104,7 @@ Work is tracked across GitHub milestones M0-M6 (49 tracked issues, 7 of them epi
 | Milestone | Description | Status |
 | --- | --- | --- |
 | M0 | Scaffold & CI | Complete |
-| M1 | Core yank buffer engine (paste-buffer ring, named buffers, yank/paste, persistence) | Complete except persistence |
+| M1 | Core yank buffer engine (paste-buffer ring, named buffers, yank/paste, persistence) | Complete |
 | M2 | Copy mode & selection (scrollback reading, key interception, motions, char/line/block selection, search) | Largely complete; search and observing external copies outstanding |
 | M3 | System clipboard bridge (`copy_to_clipboard`, backend detection, shell-out backends, OSC 52 fallback) | Partial — only Zellij's own clipboard path is wired up |
 | M4 | Buffer browser UI (list, fuzzy filter, actions, theming) | Partial — list view and actions exist; no filter or theming |

@@ -13,22 +13,29 @@ Zellij plugins, so this story starts as a spike to establish what is actually
 available before implementing a chosen approach.
 
 ## Acceptance criteria
-- [ ] Spike: determine whether the plugin's WASI-mapped `/data` or `/cache` directory (or another
+- [x] Spike: determine whether the plugin's WASI-mapped `/data` or `/cache` directory (or another
       mechanism) is writable/readable from within the plugin sandbox, and document findings
-- [ ] Based on spike results, implement serialization of the `BufferRing` (e.g. via `serde` + JSON)
-      to the chosen storage location
-- [ ] On `load()`, the plugin attempts to deserialize and restore a prior ring before falling back to empty
-- [ ] Corrupt or missing persisted state fails safe (starts with an empty ring, does not panic)
-- [ ] Findings and the chosen mechanism are documented in `docs/` or code comments for future maintainers
-- [ ] Persistence behavior is covered by at least one integration-style test or documented manual test steps
+- [x] Based on spike results, implement serialization of the `BufferRing` (not via `serde` + JSON —
+      see Technical notes) to the chosen storage location
+- [x] On `load()`, the plugin attempts to deserialize and restore a prior ring before falling back to empty
+- [x] Corrupt or missing persisted state fails safe (starts with an empty ring, does not panic)
+- [x] Findings and the chosen mechanism are documented in `docs/` or code comments for future maintainers
+- [x] Persistence behavior is covered by at least one integration-style test or documented manual test steps
 
 ## Technical notes
-- There is no confirmed, documented persistence API for Zellij plugins as of this writing.
-  The `/data`/`/cache` WASI-mapped directories are a plausible candidate to investigate but
-  this is UNVERIFIED — treat the first half of this issue as a spike, not an assumed API.
-- If no viable in-sandbox persistence exists, document that as the spike outcome and consider
-  narrowing scope to "in-memory only, survives hot-reload via `start-or-reload-plugin` state
-  retention if any, otherwise explicitly not persisted" rather than inventing a mechanism.
+- Spike resolved: `/cache` is writable and survives a plugin reload; `/data` is not usable for
+  this feature at all — Zellij's own `unload_plugin` (which a reload runs as unload-then-load)
+  unconditionally `remove_dir_all`s the plugin's `/data` directory, and it additionally sits under
+  a per-server-process UUID so it could not outlive a session either. Full source citations in
+  `docs/persistence.md`'s "Spike findings" section.
+- Serialization is NOT via `serde` + JSON as this issue originally suggested. `zclip-core` is
+  dependency-free by design (see `CONTRIBUTING.md`), so pulling in `serde` was never on the table.
+  Just as importantly, a derived `Deserialize` would reconstruct the ring's fields directly from
+  the file, bypassing `enforce_limit`, name-uniqueness, the blank-text rule, and id/seq
+  monotonicity — every invariant this module maintains. Restoring a ring has to go *through* the
+  ring's own logic (`BufferRing::restore`), not around it via a field-for-field deserialize.
+  Instead, `zclip-core::persist` defines a small bespoke text format; see `docs/persistence.md`
+  for the spec.
 - Do not block other M1 stories on this one; the ring model must work correctly with or without persistence.
 
 ## Out of scope

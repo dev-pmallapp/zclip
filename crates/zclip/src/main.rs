@@ -9,15 +9,19 @@
 //! crate can only be meaningfully built for `wasm32-wasip1`, because linking it
 //! natively drags in the whole of `zellij-utils` (curl, openssl, tokio, …).
 
+mod store;
+
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 
 use zclip_core::{
-    action_name, apply_motion, parse_buffer_limit, resolve_keymap, split_key_spec, BufferRing,
-    CopyMode, CopyModeAction, Cursor, PermissionState, Scrollback, SelectionMode,
-    DEFAULT_BUFFER_LIMIT,
+    action_name, apply_motion, parse_buffer_limit, parse_persist_mode, resolve_keymap,
+    split_key_spec, BufferRing, CopyMode, CopyModeAction, Cursor, PermissionState, PersistMode,
+    Scrollback, SelectionMode, DEFAULT_BUFFER_LIMIT,
 };
 use zellij_tile::prelude::*;
+
+use store::RingStore;
 
 /// Permissions zclip always requests at load time, regardless of config.
 ///
@@ -80,6 +84,18 @@ const PREVIEW_WIDTH: usize = 60;
 /// viewport against the real height. Nothing user-visible depends on this being
 /// right.
 const PROVISIONAL_HEIGHT: usize = 24;
+
+/// How long a changed ring waits before being written to disk.
+///
+/// A fixed window, not a sliding one: `ring_mut` arms this only when no
+/// timer is already ticking, so a burst of yanks collapses into a single
+/// write. Saving on every mutation instead would rewrite the whole file
+/// per yank -- a scripted `zellij pipe --name yank` loop over a ring of
+/// large selections would turn into megabytes of synchronous writes inside
+/// `pipe()`. The cost of the window is that a hard kill (SIGKILL, power
+/// loss) can lose up to this many seconds of yanks; every graceful path is
+/// covered by the `BeforeClose` flush.
+const SAVE_DEBOUNCE_SECS: f64 = 2.0;
 
 /// Top-level plugin state.
 #[derive(Default)]
@@ -171,6 +187,31 @@ pub struct Zclip {
     /// and turns "permission silently missing" into an explained no-op
     /// instead of a call that is a guaranteed no-op deep inside the host.
     clipboard_requested: bool,
+    /// Where (and whether) the ring is persisted to disk. `None` when the
+    /// user has not opted in (`persist = "off"`, the default), in which
+    /// case every persistence-related call site is skipped entirely rather
+    /// than becoming a no-op store -- an opted-out user should see zero
+    /// filesystem activity.
+    store: Option<RingStore>,
+    /// Whether the ring has changed since the last successful save.
+    ///
+    /// Checked by `save_if_dirty` so a debounce tick or `BeforeClose` with
+    /// nothing new to write does not touch the filesystem at all.
+    dirty: bool,
+    /// Whether the 2-second save debounce (`set_timeout` / `Event::Timer`)
+    /// is currently ticking.
+    ///
+    /// `ring_mut` arms this only when it is not already set, rather than
+    /// re-arming on every mutation -- otherwise a sustained
+    /// `zellij pipe --name yank` loop would keep sliding the deadline
+    /// forward and the ring would only ever get saved at `BeforeClose`.
+    save_armed: bool,
+    /// Whether a save failure has already been surfaced via `self.status`.
+    ///
+    /// Latched so a persistently failing debounce timer (e.g. a full disk)
+    /// appends the same sentence to the status line once, not every 2
+    /// seconds forever. Cleared on the next successful save.
+    save_error_reported: bool,
 }
 
 impl Zclip {
@@ -180,6 +221,71 @@ impl Zclip {
     /// no-op rather than an error, so every gated call site must check this.
     fn ready(&self) -> bool {
         self.permissions.is_ready()
+    }
+
+    /// The single path every ring mutation must go through.
+    ///
+    /// Marks the ring dirty and arms the save debounce (see `save_armed`'s
+    /// doc comment for why it is armed, not re-armed, here). Deliberately
+    /// not left to call sites to do by hand with a bare `self.dirty = true`
+    /// after each mutation: more mutation sites are coming (named buffers,
+    /// `clear`), and "a call site forgot to mark dirty" is a silent,
+    /// intermittent data-loss bug -- the ring looks fine in the UI the
+    /// whole time, and nothing fails until the next reload throws away
+    /// buffers no test would have caught going missing.
+    fn ring_mut(&mut self) -> &mut BufferRing {
+        self.dirty = true;
+        // Gated on `store`, not just on `save_armed`: with persistence off
+        // -- the default -- there is nothing for the timer to do, and arming
+        // it anyway would have every yank schedule a host round-trip and a
+        // wakeup for a save that can never happen. "Opted out" has to mean
+        // no activity, not activity that ends in an early return.
+        if self.store.is_some() && !self.save_armed {
+            self.save_armed = true;
+            set_timeout(SAVE_DEBOUNCE_SECS);
+        }
+        &mut self.ring
+    }
+
+    /// Writes the ring to disk if (and only if) it has changed since the
+    /// last successful save.
+    ///
+    /// A no-op when there is nothing dirty, or when persistence is off --
+    /// callers (the debounce timer, `BeforeClose`) can call this
+    /// unconditionally without checking either themselves.
+    ///
+    /// A failure is surfaced via `self.status` exactly once, latched by
+    /// `save_error_reported`: a user who opted into persistence and then
+    /// silently loses pinned buffers on the next reload has been actively
+    /// misled by the very feature they asked for, so the failure must be
+    /// visible -- but a failing write retried every 2 seconds must not
+    /// spam the same sentence onto the status line forever. `dirty` is
+    /// left set on failure, so the next mutation's debounce tick (or the
+    /// `BeforeClose` flush, whichever comes first) retries the save rather
+    /// than treating a transient failure -- a full disk, a `/cache` that
+    /// was read-only for a moment -- as permanent.
+    fn save_if_dirty(&mut self) {
+        if !self.dirty {
+            return;
+        }
+        let Some(store) = &self.store else {
+            return;
+        };
+        match store.save(&self.ring) {
+            Ok(()) => {
+                self.dirty = false;
+                self.save_error_reported = false;
+            }
+            Err(err) => {
+                if !self.save_error_reported {
+                    self.save_error_reported = true;
+                    self.status = Some(match self.status.take() {
+                        Some(existing) => format!("{existing}; {err}"),
+                        None => err,
+                    });
+                }
+            }
+        }
     }
 
     /// Records the most recently focused terminal pane.
@@ -353,7 +459,7 @@ impl Zclip {
         let lines = text.lines().count();
 
         // The ring rejects blank text, so selecting only padding yanks nothing.
-        match self.ring.push(text.as_str()) {
+        match self.ring_mut().push(text.as_str()) {
             Some(_) => {
                 // Guard against calling the host API without having
                 // requested its permission -- see `clipboard_requested`'s
@@ -510,7 +616,7 @@ impl Zclip {
 
         // The ring rejects blank text itself, so an empty selection can never
         // create an entry.
-        match self.ring.push(text) {
+        match self.ring_mut().push(text) {
             Some(_) => {
                 let count = self.ring.len();
                 self.status = Some(format!("yanked ({count} in ring)"));
@@ -711,7 +817,7 @@ impl Zclip {
             BareKey::Char('d') => {
                 match self.ring.most_recent().map(|b| b.id()) {
                     Some(id) => {
-                        self.ring.remove(id);
+                        self.ring_mut().remove(id);
                         self.status = Some("deleted most recent buffer".into());
                     }
                     None => self.status = Some("ring is empty — nothing to delete".into()),
@@ -856,12 +962,63 @@ impl ZellijPlugin for Zclip {
             None => DEFAULT_BUFFER_LIMIT,
         };
 
+        let persist_mode = match configuration.get("persist") {
+            Some(raw) => match parse_persist_mode(raw) {
+                Ok(mode) => mode,
+                Err(err) => {
+                    // Same fallback contract as `buffer_limit` above: a typo
+                    // here degrades to the safe default (no persistence)
+                    // rather than refusing to start.
+                    self.status = Some(match self.status.take() {
+                        Some(existing) => format!("{existing}; {err}; persist off"),
+                        None => format!("{err}; persist off"),
+                    });
+                    PersistMode::Off
+                }
+            },
+            None => PersistMode::Off,
+        };
+
         self.config = configuration;
-        self.ring = BufferRing::new(limit);
+        // Hoisted above the ring construction so the one `PluginIds` answer
+        // serves both `own_plugin_id` and the persistence store below --
+        // `get_plugin_ids()` is a host round-trip, and there is no reason to
+        // pay for it twice for the same, unchanging values.
+        let ids = get_plugin_ids();
+        self.own_plugin_id = Some(ids.plugin_id);
+
+        // Building the store and restoring from it here, ahead of
+        // `request_permission` below, is deliberate and safe: WASI file IO
+        // needs no Zellij permission at all (see `store` module docs), so
+        // there is no reason to make the user wait for a permission grant
+        // before their persisted buffers show up -- the ring is ready
+        // before the very first render instead of popping in later.
+        self.store = RingStore::new(persist_mode, &ids);
+        let (ring, restore_message) = match &self.store {
+            Some(store) => store.load(limit),
+            None => (BufferRing::new(limit), None),
+        };
+        // Defensive: `load` only ever runs once per plugin instance, but a
+        // restore silently overwriting buffers already in memory would be
+        // exactly the kind of surprising data loss this whole feature
+        // exists to prevent, so refuse to do it if `self.ring` is ever
+        // non-empty by the time we get here.
+        if self.ring.is_empty() {
+            self.ring = ring;
+        }
+        if let Some(message) = restore_message {
+            self.status = Some(match self.status.take() {
+                Some(existing) => format!("{existing}; {message}"),
+                None => message,
+            });
+        }
+        if let Some(store) = &self.store {
+            store.gc();
+        }
+
         // Until the first render tells us the real geometry, paging motions
         // would otherwise treat the window as zero-height and step one line.
         self.last_render_height = PROVISIONAL_HEIGHT;
-        self.own_plugin_id = Some(get_plugin_ids().plugin_id);
 
         // `zclip-core` resolves presets and `key_*` overrides into
         // (action, raw key-spec) pairs -- it has no `zellij-tile` dependency,
@@ -960,6 +1117,10 @@ impl ZellijPlugin for Zclip {
             // permission: `ReadApplicationState` (already requested above
             // for `PaneUpdate`) is what gates this event too.
             EventType::ModeUpdate,
+            // Delivers the debounced persistence save -- see `ring_mut` and
+            // `Event::Timer` below. `set_timeout` is ungated, so this needs
+            // no new permission either.
+            EventType::Timer,
         ]);
     }
 
@@ -1007,6 +1168,21 @@ impl ZellijPlugin for Zclip {
                 self.last_key_source = Some(("InterceptedKeyPress", key.to_string()));
                 self.handle_copy_mode_key(&key)
             }
+            Event::Timer(_) => {
+                // The debounce window has elapsed; the next mutation gets to
+                // arm a fresh one. Cleared before saving (rather than after)
+                // so a save that itself somehow re-enters `ring_mut` (it
+                // does not today, but nothing here should rely on that)
+                // still arms correctly instead of finding the flag already
+                // set from this very tick.
+                self.save_armed = false;
+                // Only a `status` change (a newly-surfaced save error, or
+                // one just cleared) warrants spending a render on a save
+                // the user never asked to see the result of.
+                let status_before = self.status.clone();
+                self.save_if_dirty();
+                self.status != status_before
+            }
             Event::BeforeClose => {
                 // Safety valve, same spirit as the intercept release below: if
                 // zclip's pane is closed while it is standing in for a
@@ -1023,6 +1199,14 @@ impl ZellijPlugin for Zclip {
                 // keyboard, release it. Otherwise the intercept outlives the UI
                 // and the user is left typing into nothing.
                 clear_key_presses_intercepts();
+                // Last chance to persist: this event is delivered on the
+                // unload path (verified in zellij's `unload_plugin`), so
+                // anything yanked inside the current debounce window would
+                // otherwise die with the instance. It runs *after* the pane
+                // swap-back and the intercept release above, deliberately --
+                // both of those are what stand between the user and a usable
+                // terminal, and neither should wait on a disk write.
+                self.save_if_dirty();
                 false
             }
             _ => false,
@@ -1070,7 +1254,7 @@ impl ZellijPlugin for Zclip {
                 // scriptable entry point ("pipe some text straight into the
                 // ring") and is what makes the pipe surface testable without a
                 // mouse selection.
-                match selector.and_then(|text| self.ring.push(text)) {
+                match selector.and_then(|text| self.ring_mut().push(text)) {
                     Some(_) => self.status = Some(format!("yanked ({} in ring)", self.ring.len())),
                     None => self.status = Some("nothing to yank — empty payload".into()),
                 }
