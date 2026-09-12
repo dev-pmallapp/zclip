@@ -72,6 +72,14 @@
             runHook preInstall
             install -Dm444 target/wasm32-wasip1/release/zclip.wasm \
               $out/bin/zclip.wasm
+            # The example config ships alongside the plugin because zclip is
+            # inert without it: every entry point (copy mode, paste, the
+            # buffer list) is reached through a `MessagePlugin` keybinding the
+            # user has to write, so a bare .wasm cannot be invoked at all.
+            # Installing only the binary would hand someone a plugin with no
+            # way to reach it and nothing to copy from.
+            install -Dm444 examples/zclip.kdl \
+              $out/share/zclip/zclip.kdl
             runHook postInstall
           '';
 

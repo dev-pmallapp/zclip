@@ -30,6 +30,10 @@ A downloadable `zclip.wasm` release artifact is planned for v0.1.0 (M6).
 ## Configuration
 
 See [`examples/zclip.kdl`](examples/zclip.kdl) for a complete, commented example.
+If you installed via the flake, that same file is installed alongside the
+plugin at `$out/share/zclip/zclip.kdl` (the plugin itself is
+`$out/bin/zclip.wasm`).
+
 The essentials:
 
 ```kdl
