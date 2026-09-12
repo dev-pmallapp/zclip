@@ -17,7 +17,19 @@
   };
 
   outputs = { self, nixpkgs, flake-utils, rust-overlay }:
-    flake-utils.lib.eachDefaultSystem (system:
+    # Deliberately NOT `eachDefaultSystem`, which would also claim
+    # x86_64-darwin. Nixpkgs 26.11 dropped that platform outright, so
+    # evaluating it does not merely fail to build -- it aborts with
+    # "Nixpkgs 26.11 has dropped support for x86_64-darwin", which is enough
+    # to make `nix flake check --all-systems` fail for everyone regardless of
+    # what they are actually on. Advertising a platform this flake's own
+    # nixpkgs pin cannot produce helps nobody; an Intel Mac user is better
+    # served by a clear "not supported" than by that trace.
+    flake-utils.lib.eachSystem [
+      "x86_64-linux"
+      "aarch64-linux"
+      "aarch64-darwin"
+    ] (system:
       let
         pkgs = import nixpkgs {
           inherit system;
