@@ -2,11 +2,29 @@
 
 [![CI](https://github.com/dev-pmallapp/zclip/actions/workflows/ci.yml/badge.svg)](https://github.com/dev-pmallapp/zclip/actions/workflows/ci.yml)
 
-`zclip` is a [Zellij](https://zellij.dev) plugin that implements a tmux-like in-app yank-buffer (paste-buffer) ring, with optional bridging to the system clipboard via `xclip`, `wl-copy`, `pbcopy`, or `clip.exe`.
+`zclip` is a [Zellij](https://zellij.dev) plugin that implements a tmux-like in-app yank-buffer (paste-buffer) ring, with optional bridging to the system clipboard through Zellij's own configured clipboard command.
 
 ## Status
 
-**Pre-alpha. Nothing works yet.** Only the M0 scaffold exists: the crate builds, requests permissions, and renders a placeholder line. There is no yank buffer, no copy mode, and no clipboard bridge yet. Do not expect a usable plugin at this stage.
+Alpha software: the core yank/paste/copy-mode workflow works end to end, but
+it is not yet release-ready and there is no tagged release to install.
+
+What works today:
+
+- A paste-buffer ring with eviction, plus named/pinned buffers that never get evicted
+- Yank and paste, including pasting into whichever pane is currently focused
+- Copy mode: scrollback reading, vi and emacs keymap presets, per-action `key_*` overrides, cursor motions, and char/line/block selection with reverse-video highlighting
+- A buffer list view with previews and delete/yank/paste actions
+- A pipe interface (`yank`, `paste`, `copy_mode`, `cancel`, `list`) usable from keybindings or `zellij pipe`, plus headless/background loading
+- CI (fmt, clippy, tests, wasm build) and a tag-triggered release workflow
+
+Notable gaps before v0.1.0:
+
+- No persistence — the buffer ring lives in memory and is lost on plugin reload
+- No incremental search in copy mode, and no observation of copies made outside zclip
+- Clipboard integration only reaches Zellij's own configured clipboard command; there is no shell-out to `xclip`/`wl-copy`/`pbcopy`/`clip.exe` and no OSC 52 fallback
+- No fuzzy filtering or theming in the buffer list
+- No tagged release yet
 
 ## Requirements
 
@@ -18,12 +36,23 @@
 
 ## Install
 
-There is no release yet. Build from source:
+There is no tagged release yet. Build from source:
 
 ```sh
 cargo build --workspace --target wasm32-wasip1 --release
 cp target/wasm32-wasip1/release/zclip.wasm ~/.config/zellij/plugins/zclip.wasm
 ```
+
+Or use the Nix flake, which builds the same plugin plus the example config:
+
+```sh
+nix build github:dev-pmallapp/zclip
+# -> result/bin/zclip.wasm
+# -> result/share/zclip/zclip.kdl
+```
+
+`nix develop` also gives you a dev shell with the pinned toolchain if you'd
+rather build from a checkout.
 
 A downloadable `zclip.wasm` release artifact is planned for v0.1.0 (M6).
 
@@ -66,17 +95,17 @@ Escape byte, so binding it would break Escape.
 
 ## Roadmap
 
-Work is tracked across GitHub milestones M0-M6 (45 tracked issues).
+Work is tracked across GitHub milestones M0-M6 (49 tracked issues, 7 of them epics).
 
-| Milestone | Description |
-| --- | --- |
-| M0 | Scaffold & CI *(in progress)* |
-| M1 | Core yank buffer engine (paste-buffer ring, named buffers, yank/paste, persistence) |
-| M2 | Copy mode & selection (scrollback reading, key interception, motions, char/line/block selection, search) |
-| M3 | System clipboard bridge (`copy_to_clipboard`, backend detection, shell-out backends, OSC 52 fallback) |
-| M4 | Buffer browser UI (list, fuzzy filter, actions, theming) |
-| M5 | Config, keybindings & pipes (`zellij pipe`, plugin-to-plugin messaging, headless mode) |
-| M6 | v0.1.0 release |
+| Milestone | Description | Status |
+| --- | --- | --- |
+| M0 | Scaffold & CI | Complete |
+| M1 | Core yank buffer engine (paste-buffer ring, named buffers, yank/paste, persistence) | Complete except persistence |
+| M2 | Copy mode & selection (scrollback reading, key interception, motions, char/line/block selection, search) | Largely complete; search and observing external copies outstanding |
+| M3 | System clipboard bridge (`copy_to_clipboard`, backend detection, shell-out backends, OSC 52 fallback) | Partial — only Zellij's own clipboard path is wired up |
+| M4 | Buffer browser UI (list, fuzzy filter, actions, theming) | Partial — list view and actions exist; no filter or theming |
+| M5 | Config, keybindings & pipes (`zellij pipe`, plugin-to-plugin messaging, headless mode) | Largely complete; plugin-to-plugin messaging outstanding |
+| M6 | v0.1.0 release | Release workflow in place; nothing tagged yet |
 
 ## Development
 

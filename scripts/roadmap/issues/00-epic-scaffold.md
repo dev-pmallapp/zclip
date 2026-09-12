@@ -13,12 +13,12 @@ templates). This epic tracks all scaffolding work required to get a green CI bui
 of a trivial, loadable Zellij plugin.
 
 ## Acceptance criteria
-- [ ] `cargo build --target wasm32-wasip1` produces a loadable `.wasm` plugin binary
-- [ ] The plugin registers via `register_plugin!` and implements the four `ZellijPlugin` lifecycle methods as no-op stubs
-- [ ] The plugin requests and gates on the permissions it needs before calling any gated host API
-- [ ] CI runs fmt, clippy, `cargo test` (native) and the wasm32-wasip1 build on every PR
-- [ ] A documented dev loop exists for hot-reloading the plugin in a running Zellij session
-- [ ] README skeleton, CONTRIBUTING, and issue/PR templates exist in the repo
+- [x] `cargo build --target wasm32-wasip1` produces a loadable `.wasm` plugin binary
+- [x] The plugin registers via `register_plugin!` and implements the four `ZellijPlugin` lifecycle methods as no-op stubs
+- [x] The plugin requests and gates on the permissions it needs before calling any gated host API
+- [x] CI runs fmt, clippy, `cargo test` (native) and the wasm32-wasip1 build on every PR
+- [x] A documented dev loop exists for hot-reloading the plugin in a running Zellij session
+- [x] README skeleton, CONTRIBUTING, and issue/PR templates exist in the repo
 
 ## Technical notes
 Pin `zellij-tile = "0.45"` and target `wasm32-wasip1` (formerly `wasm32-wasi`).

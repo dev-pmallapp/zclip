@@ -11,12 +11,12 @@ contributors (or future maintainers) can orient themselves, install the
 plugin, or open well-formed issues and pull requests.
 
 ## Acceptance criteria
-- [ ] README.md describes what zclip is, its status, install instructions, and a KDL config snippet
-- [ ] README includes a CI status badge and links to the dev-loop docs
-- [ ] CONTRIBUTING.md documents the build/test/lint commands and PR expectations
-- [ ] `.github/ISSUE_TEMPLATE/` has at least a bug-report and feature-request template
-- [ ] `.github/PULL_REQUEST_TEMPLATE.md` exists with a checklist (tests, fmt, clippy)
-- [ ] A CHANGELOG.md (or "Keep a Changelog" stub) is initialized
+- [x] README.md describes what zclip is, its status, install instructions, and a KDL config snippet
+- [x] README includes a CI status badge and links to the dev-loop docs
+- [x] CONTRIBUTING.md documents the build/test/lint commands and PR expectations
+- [x] `.github/ISSUE_TEMPLATE/` has at least a bug-report and feature-request template
+- [x] `.github/PULL_REQUEST_TEMPLATE.md` exists with a checklist (tests, fmt, clippy)
+- [x] A CHANGELOG.md (or "Keep a Changelog" stub) is initialized
 
 ## Technical notes
 - Keep README config examples aligned with actual `load()`/KDL config keys as they are added

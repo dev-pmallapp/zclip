@@ -23,15 +23,15 @@ dependency-free and tests in under a second, while `zclip` is only ever built
 for `wasm32-wasip1`, where none of those dependencies exist.
 
 ## Acceptance criteria
-- [ ] A GitHub Actions workflow runs on every push to `main` and every pull request
-- [ ] `cargo fmt --all -- --check` fails the build on unformatted code
-- [ ] `cargo clippy -p zclip-core --all-targets -- -D warnings` fails the build on lint warnings
-- [ ] `cargo test -p zclip-core --all-targets` runs natively with **no** system libraries installed
-- [ ] `cargo clippy --workspace --target wasm32-wasip1 --all-targets -- -D warnings` lints the plugin crate
-- [ ] `cargo build --workspace --target wasm32-wasip1 --release` runs in a separate job and fails on compile errors
-- [ ] The job asserts `target/wasm32-wasip1/release/zclip.wasm` exists and uploads it as a build artifact
-- [ ] Rust toolchain and cargo registry/build output are cached between runs
-- [ ] Workflow status badge added to README
+- [x] A GitHub Actions workflow runs on every push to `main` and every pull request
+- [x] `cargo fmt --all -- --check` fails the build on unformatted code
+- [x] `cargo clippy -p zclip-core --all-targets -- -D warnings` fails the build on lint warnings
+- [x] `cargo test -p zclip-core --all-targets` runs natively with **no** system libraries installed
+- [x] `cargo clippy --workspace --target wasm32-wasip1 --all-targets -- -D warnings` lints the plugin crate
+- [x] `cargo build --workspace --target wasm32-wasip1 --release` runs in a separate job and fails on compile errors
+- [x] The job asserts `target/wasm32-wasip1/release/zclip.wasm` exists and uploads it as a build artifact
+- [x] Rust toolchain and cargo registry/build output are cached between runs
+- [x] Workflow status badge added to README
 
 ## Technical notes
 - Use `dtolnay/rust-toolchain` (with `targets: wasm32-wasip1` in the wasm job) and
