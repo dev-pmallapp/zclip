@@ -19,7 +19,7 @@ use zclip_core::{
 };
 use zellij_tile::prelude::*;
 
-/// Permissions zclip requests at load time.
+/// Permissions zclip always requests at load time, regardless of config.
 ///
 /// - `ReadApplicationState` — receive `PaneUpdate`, so we know which terminal
 ///   pane the user was last in (the yank source and paste target).
@@ -36,26 +36,39 @@ use zellij_tile::prelude::*;
 ///   and swap it back out again on exit. See `enter_copy_mode` /
 ///   `exit_copy_mode`.
 ///
-/// - `WriteToClipboard` — `copy_to_clipboard`, backing the `yank_clipboard`
-///   copy-mode action. Note this is *not* the same capability as shelling out
-///   to `xclip`/`wl-copy`: `copy_to_clipboard` hands the text to Zellij, which
-///   writes it wherever the user's own `copy_command`/`copy_clipboard` config
-///   already points. That is why zclip can reach the system clipboard without
-///   `RunCommands`, and why it inherits a working clipboard setup instead of
-///   second-guessing one.
+/// `WriteToClipboard` is deliberately NOT in this list -- see
+/// [`CLIPBOARD_PERMISSION`] and `load`'s conditional request for why.
 ///
 /// Capabilities for later milestones are deliberately *not* requested, so users
 /// are not asked to approve something zclip cannot yet do: `RunCommands`
 /// (shell-out clipboard backends and OSC 52 fallback, M3), `ReadCliPipes`
 /// (`zellij pipe`, M5).
-const REQUIRED_PERMISSIONS: &[PermissionType] = &[
+const CORE_PERMISSIONS: &[PermissionType] = &[
     PermissionType::ReadApplicationState,
     PermissionType::ReadPaneContents,
     PermissionType::WriteToStdin,
     PermissionType::InterceptInput,
     PermissionType::ChangeApplicationState,
-    PermissionType::WriteToClipboard,
 ];
+
+/// The one permission zclip requests CONDITIONALLY rather than always.
+///
+/// Backs `copy_to_clipboard`, which in turn backs the `yank_clipboard`
+/// copy-mode action. Note this is *not* the same capability as shelling out
+/// to `xclip`/`wl-copy`: `copy_to_clipboard` hands the text to Zellij, which
+/// writes it wherever the user's own `copy_command`/`copy_clipboard` config
+/// already points. That is why zclip can reach the system clipboard without
+/// `RunCommands`, and why it inherits a working clipboard setup instead of
+/// second-guessing one.
+///
+/// It is requested only when the user has actually bound something to
+/// `YankToClipboard` (via `key_yank_clipboard`, since neither preset binds
+/// it by default -- see `keymap::VI_PRESET` / `keymap::EMACS_PRESET`). A
+/// user who never asked for clipboard integration must never be asked to
+/// grant it: that is the whole point of splitting this out of
+/// [`CORE_PERMISSIONS`]. See `load` for where the two lists are joined into
+/// a single `request_permission` call.
+const CLIPBOARD_PERMISSION: PermissionType = PermissionType::WriteToClipboard;
 
 /// How many characters of a buffer to show per row in the list.
 const PREVIEW_WIDTH: usize = 60;
@@ -147,6 +160,17 @@ pub struct Zclip {
     /// finds nothing -- this is purely a diagnostic, not something that
     /// changes what `keys` itself contains or how a key behaves.
     shadowed_keys: Vec<String>,
+    /// Whether `load` found a `YankToClipboard` binding in the resolved
+    /// keymap and therefore requested [`CLIPBOARD_PERMISSION`] alongside
+    /// [`CORE_PERMISSIONS`].
+    ///
+    /// `handle_copy_mode_key` checks this before calling `copy_to_clipboard`
+    /// rather than trusting that a `YankToClipboard` binding always implies
+    /// the permission was requested. Given `load`'s own logic those two
+    /// facts can never disagree in practice -- but the check is nearly free
+    /// and turns "permission silently missing" into an explained no-op
+    /// instead of a call that is a guaranteed no-op deep inside the host.
+    clipboard_requested: bool,
 }
 
 impl Zclip {
@@ -331,19 +355,27 @@ impl Zclip {
         // The ring rejects blank text, so selecting only padding yanks nothing.
         match self.ring.push(text.as_str()) {
             Some(_) => {
-                if to_clipboard {
+                // Guard against calling the host API without having
+                // requested its permission -- see `clipboard_requested`'s
+                // doc comment for why this should be unreachable given
+                // `load`'s logic, and why it is still worth checking.
+                let clipboard_note = if to_clipboard && self.clipboard_requested {
                     // Routes through Zellij's own configured clipboard
                     // destination rather than shelling out -- see
-                    // REQUIRED_PERMISSIONS' note on WriteToClipboard. There is
-                    // no result to check: the host takes the text and reports
-                    // nothing back, so a misconfigured `copy_command` on the
-                    // user's side fails silently here by construction.
+                    // CLIPBOARD_PERMISSION's doc comment. There is no result
+                    // to check: the host takes the text and reports nothing
+                    // back, so a misconfigured `copy_command` on the user's
+                    // side fails silently here by construction.
                     copy_to_clipboard(&text);
-                }
+                    " + clipboard".to_string()
+                } else if to_clipboard {
+                    " (clipboard permission was never requested — yanked to ring only)".to_string()
+                } else {
+                    String::new()
+                };
                 self.exit_copy_mode();
-                let destination = if to_clipboard { " + clipboard" } else { "" };
                 self.status = Some(format!(
-                    "yanked {lines} line(s) — {} in ring{destination}",
+                    "yanked {lines} line(s) — {} in ring{clipboard_note}",
                     self.ring.len()
                 ));
             }
@@ -891,7 +923,31 @@ impl ZellijPlugin for Zclip {
             });
         }
 
-        request_permission(REQUIRED_PERMISSIONS);
+        // Ask for the clipboard permission only if the resolved key table
+        // actually contains a binding that could use it. `keys` is fully
+        // resolved by this point (presets + overrides + the guaranteed
+        // `Cancel` above), so this is the definitive answer to "did the
+        // user opt into clipboard yank", not a guess from raw config.
+        self.clipboard_requested = self
+            .keys
+            .values()
+            .any(|action| *action == CopyModeAction::YankToClipboard);
+
+        // This MUST be a single `request_permission` call. `PermissionState`
+        // (see `ready`/`Event::PermissionRequestResult`) treats permissions
+        // as all-or-nothing per request: it becomes ready on the first
+        // result and has no notion of "half granted, waiting on a second
+        // batch". A later, separate `request_permission` call for
+        // `CLIPBOARD_PERMISSION` would therefore not augment the existing
+        // grant -- it would show the user a second prompt after the plugin
+        // is already running. Building one combined list up front, as done
+        // here, is the only way to both keep clipboard access opt-in AND
+        // ask for it exactly once, at startup, like everything else.
+        let mut permissions = CORE_PERMISSIONS.to_vec();
+        if self.clipboard_requested {
+            permissions.push(CLIPBOARD_PERMISSION);
+        }
+        request_permission(&permissions);
         subscribe(&[
             EventType::PermissionRequestResult,
             EventType::PaneUpdate,

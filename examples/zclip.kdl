@@ -71,7 +71,24 @@ plugins {
         //   top, bottom,
         //   half_page_up, half_page_down, page_up, page_down,
         //   select_char, select_line, select_block,
-        //   yank, cancel
+        //   yank, yank_clipboard, cancel
+        //
+        // NOTE on `yank_clipboard`: unlike every other action above, it has
+        // NO default binding in either preset -- `key_yank_clipboard` is
+        // required to reach it at all (e.g. `key_yank_clipboard "Y"`, vi's
+        // own "same operator, wider reach" convention: lowercase acts
+        // locally, the shifted twin does the bigger thing). This is
+        // deliberate, not an oversight: binding it by default would mean
+        // asking EVERY user to grant the `WriteToClipboard` permission at
+        // startup, whether or not they want clipboard integration. Setting
+        // `key_yank_clipboard` is therefore the opt-in switch itself --
+        // zclip requests `WriteToClipboard` (in addition to the handful of
+        // permissions it always asks for) if and only if this key resolves
+        // to a binding. The action copies the selection into both the
+        // paste-buffer ring AND the system clipboard, routed through
+        // Zellij's own configured `copy_command`/`copy_clipboard` -- zclip
+        // does not shell out to a clipboard tool itself, it just hands
+        // Zellij the text.
         //
         // An unknown `keymap` value, an unknown action name after `key_`, or
         // a value that fails to parse as a key (or a comma-separated list of

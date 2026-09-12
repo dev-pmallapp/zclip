@@ -161,12 +161,18 @@ pub const VI_PRESET: &[(CopyModeAction, &str)] = &[
     (CopyModeAction::Select(SelectionMode::Line), "V"),
     (CopyModeAction::Select(SelectionMode::Block), "Ctrl v"),
     (CopyModeAction::Yank, "y"),
-    // vi's own "same operator, wider reach" convention: lowercase acts
-    // locally, the shifted twin does the bigger thing. Mirrors the `"+y`
-    // idea (yank to the system clipboard rather than the local register)
-    // without needing vi's register-prefix grammar, which copy mode has no
-    // equivalent of.
-    (CopyModeAction::YankToClipboard, "Y"),
+    // `YankToClipboard` has NO preset entry here, deliberately. Binding it
+    // by default -- for every vi-preset user, whether or not they want
+    // clipboard integration -- would mean requesting the `WriteToClipboard`
+    // permission unconditionally at load, which is exactly the always-on
+    // prompt zclip's permission doc comment says it avoids for later-
+    // milestone capabilities. Reaching the clipboard must stay an explicit
+    // act: a user opts in with `key_yank_clipboard = "Y"` (see the note in
+    // examples/zclip.kdl), and only then does the plugin ask for the extra
+    // permission. This also frees `Y` here, which is fine: `Y` had no
+    // meaning in copy mode before clipboard yank arrived, so leaving it
+    // unbound is a return to that prior, unremarkable state, not a
+    // regression.
     (CopyModeAction::Cancel, "Esc"),
 ];
 
@@ -198,13 +204,13 @@ pub const EMACS_PRESET: &[(CopyModeAction, &str)] = &[
     (CopyModeAction::Select(SelectionMode::Line), "Alt l"),
     (CopyModeAction::Select(SelectionMode::Block), "Alt r"),
     (CopyModeAction::Yank, "Alt w"),
-    // Emacs has no native "kill-ring-save, but to the system clipboard"
-    // binding to be faithful to -- under a window system its kill ring *is*
-    // the clipboard, so the distinction never arose. `Alt W` is therefore
-    // chosen for the same reason vi's preset uses `Y`: the shifted twin of
-    // the plain yank key, so the pair stays learnable as one rule across
-    // both presets rather than two unrelated facts.
-    (CopyModeAction::YankToClipboard, "Alt W"),
+    // `YankToClipboard` has no preset entry here either, for the same reason
+    // `VI_PRESET` leaves it unbound -- see that preset's comment. Emacs has
+    // no native "kill-ring-save, but to the system clipboard" binding to be
+    // faithful to anyway (under a window system its kill ring *is* the
+    // clipboard, so the distinction never arose there), which only
+    // reinforces that there is no default worth forcing a permission
+    // prompt for.
     (CopyModeAction::Cancel, "Ctrl g, Esc"),
 ];
 
@@ -372,6 +378,35 @@ mod tests {
         assert_eq!(
             spec_for(&bindings, CopyModeAction::Motion(Motion::Down)),
             "j, Down"
+        );
+    }
+
+    #[test]
+    fn yank_clipboard_has_no_default_binding_in_either_preset() {
+        // The whole point of leaving `YankToClipboard` out of both preset
+        // tables: no user should be bound to it -- and therefore prompted
+        // for the clipboard permission -- without asking for it explicitly.
+        for preset in [VI_PRESET, EMACS_PRESET] {
+            assert!(
+                preset
+                    .iter()
+                    .all(|(action, _)| *action != CopyModeAction::YankToClipboard),
+                "a preset must not bind YankToClipboard by default"
+            );
+        }
+    }
+
+    #[test]
+    fn yank_clipboard_is_still_resolvable_via_an_explicit_override() {
+        // Absent from the preset, but not absent from the vocabulary: a
+        // user who explicitly opts in via `key_yank_clipboard` must still
+        // get a working binding out of `resolve_keymap`.
+        let (bindings, warnings) = resolve_keymap(&config(&[("key_yank_clipboard", "Y")]));
+        assert!(warnings.is_empty());
+        assert_eq!(
+            spec_for(&bindings, CopyModeAction::YankToClipboard),
+            "Y",
+            "an explicit key_yank_clipboard override must produce a binding"
         );
     }
 
