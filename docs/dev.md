@@ -2,21 +2,41 @@
 
 ## Prerequisites
 
+The easiest path is the flake in this repo:
+
+```sh
+nix develop
+```
+
+(or `direnv allow`, since a `.envrc` with `use flake` is committed). Either
+gives you the pinned Rust toolchain with the `wasm32-wasip1` target already
+installed, plus `just`, `cargo-watch`, `binaryen` and `zellij` — without
+writing anything into `~/.rustup` or `~/.cargo`. It also carries
+`pkg-config`, `openssl` and `curl` so that a *native* build of
+`crates/zclip` (see below for why you'd ever want one) is debuggable from
+inside the shell without leaving it.
+
+The flake is not mandatory, though: plain rustup works fine on any
+platform.
+
 - Rust stable, with the `wasm32-wasip1` target:
 
   ```sh
   rustup target add wasm32-wasip1
   ```
 
+  (`rust-toolchain.toml` already declares this target, so a plain `rustup`
+  invocation in this repo picks it up automatically — the command above is
+  only needed if rustup complains the target is missing.)
+
 - `zellij` on `PATH`.
 - Optionally `just` and `cargo-watch` for the fast dev loop.
 
-**NixOS note:** this repo has no flake yet, so for the tooling above,
-`nix-shell -p just cargo-watch` is enough. A *native* build of
-`crates/zclip` additionally needs `nix-shell -p pkg-config openssl curl`,
-because `zellij-tile` transitively pulls in curl/openssl on non-wasm
-targets. In practice you should never need this: `zclip` is only ever built
-for `wasm32-wasip1` (see below).
+**NixOS note (no flakes):** if you're on NixOS without flakes enabled,
+`nix-shell -p rustup` followed by
+`rustup toolchain install stable --target wasm32-wasip1` still works. Note
+that this writes a second Rust toolchain into your home directory — exactly
+what the flake above avoids, so prefer it if you can enable flakes.
 
 ## The workspace layout
 
@@ -85,7 +105,14 @@ first so the wasm artifact exists.
 ```sh
 just test
 just lint
+just nix-check
 ```
+
+`just nix-check` is what CI's `nix` job runs: it evaluates the flake for
+every advertised system and then builds the `zclip` derivation for the
+current one, catching Cargo.lock drift or a broken buildPhase/installPhase
+that a plain `cargo build` wouldn't. It needs Nix with flakes enabled; skip
+it if you're not on Nix.
 
 **Never run a bare `cargo test` or `cargo build` at the workspace root.**
 Doing so will try to link `crates/zclip` natively, pulling in

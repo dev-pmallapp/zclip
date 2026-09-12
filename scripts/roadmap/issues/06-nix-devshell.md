@@ -19,14 +19,14 @@ Nix-managed Rust. A flake devshell gives the right toolchain without touching
 the user's home directory.
 
 ## Acceptance criteria
-- [ ] `flake.nix` exposes a `devShells.default` providing a Rust toolchain **with the `wasm32-wasip1` target**
-- [ ] The shell also provides `just`, `cargo-watch` and `zellij`
-- [ ] The shell provides `pkg-config`, `openssl` and `curl` so that a *native* build of `crates/zclip` works for anyone who needs to debug one (normally unnecessary — see #2)
-- [ ] `nix develop` followed by `just build` produces `target/wasm32-wasip1/release/zclip.wasm` on a machine with no rustup
-- [ ] `flake.lock` is committed
-- [ ] `nix flake check` passes
-- [ ] `docs/dev.md` leads with the flake and demotes the `nix-shell -p rustup` route to a fallback
-- [ ] A `.envrc` (`use flake`) is provided for direnv users, and `.direnv/` is gitignored
+- [x] `flake.nix` exposes a `devShells.default` providing a Rust toolchain **with the `wasm32-wasip1` target**
+- [x] The shell also provides `just`, `cargo-watch` and `zellij`
+- [x] The shell provides `pkg-config`, `openssl` and `curl` so that a *native* build of `crates/zclip` works for anyone who needs to debug one (normally unnecessary — see #2)
+- [x] `nix develop` followed by `just build` produces `target/wasm32-wasip1/debug/zclip.wasm` on a machine with no rustup (`just build-release` for the release profile; `just build` is the dev-loop recipe and is deliberately unoptimized)
+- [x] `flake.lock` is committed
+- [x] `nix flake check` passes
+- [x] `docs/dev.md` leads with the flake and demotes the `nix-shell -p rustup` route to a fallback
+- [x] A `.envrc` (`use flake`) is provided for direnv users, and `.direnv/` is gitignored
 
 ## Technical notes
 - Use a toolchain overlay that can add targets — either

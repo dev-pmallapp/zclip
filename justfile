@@ -24,6 +24,12 @@ lint:
     cargo clippy -p zclip-core --all-targets -- -D warnings
     cargo clippy --workspace --target wasm32-wasip1 --all-targets -- -D warnings
 
+# Mirrors what CI's `nix` job runs. Needs Nix with flakes; if you're not on
+# Nix, ignore this, the flake is not mandatory.
+nix-check:
+    nix flake check --all-systems --no-build
+    nix flake check --print-build-logs
+
 fmt:
     cargo fmt --all
 

@@ -128,8 +128,27 @@
             pkgs.cargo-watch
             pkgs.binaryen
             pkgs.zellij
+
+            # Not needed for the normal wasm32-wasip1 build -- only here so
+            # that a *native* build of crates/zclip (which drags
+            # zellij-utils -> isahc -> curl -> openssl-sys in on non-wasm
+            # targets) is debuggable from inside the shell without having to
+            # leave it to find these. An explicit acceptance criterion of
+            # 06-nix-devshell.md.
+            pkgs.pkg-config
+            pkgs.openssl
+            pkgs.curl
           ];
         };
+
+        # `nix flake check` only *evaluates* `packages` and `devShells` -- it
+        # only *builds* derivations listed under `checks`. Without this,
+        # a flake that evaluates cleanly but cannot build (Cargo.lock drift
+        # against the vendored deps, a rustPlatform hook change, the custom
+        # buildPhase/installPhase above breaking) would sail through the very
+        # check meant to catch it: before this attribute existed, a full
+        # `nix flake check` here finished in seconds without compiling a line.
+        checks.zclip = self.packages.${system}.zclip;
 
         formatter = pkgs.nixpkgs-fmt;
       });

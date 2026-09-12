@@ -94,3 +94,68 @@ jobs:
         with:
           name: zclip-wasm
           path: target/wasm32-wasip1/release/zclip.wasm
+
+  nix:
+    name: nix flake check
+    runs-on: ubuntu-latest
+    # Deliberately no Swatinem/rust-cache here: Nix does its own build in its
+    # own store (/nix/store), sharing nothing with the cargo jobs above, so
+    # cargo's cache would neither help this job nor be helped by it.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # Two invocations, not one, because they check different things and
+      # this runner can only do one of them for real:
+      #
+      # `--no-build` first: flake.nix advertises x86_64-linux, aarch64-linux
+      # and aarch64-darwin (see the x86_64-darwin comment in flake.nix for
+      # why not that too), but an x86_64-linux runner cannot *build* the two
+      # aarch64 derivations. It can still *evaluate* them, and evaluation is
+      # exactly where a typo'd attribute path or a system-specific expression
+      # error would show up. Skipping this would mean an eval error on a
+      # platform nobody on the team runs day-to-day only surfaces on a
+      # contributor's machine, possibly mid-release.
+      - name: nix flake check --all-systems (evaluation)
+        run: nix flake check --all-systems --no-build
+
+      # Then the real thing: build whatever this runner's system (x86_64-linux)
+      # can build, i.e. the `checks.zclip` derivation added for this purpose.
+      - name: nix flake check
+        run: nix flake check --print-build-logs
+
+      # `nix flake check` proves the derivation *builds*, not that `$out`
+      # contains anything useful -- an installPhase that silently installed
+      # nothing would still exit 0. The store paths were already built by
+      # the previous step, so `nix build` here is a store lookup (the
+      # derivation is already realized), not a rebuild.
+      - name: verify the flake package installs the plugin and the example config
+        run: |
+          nix build .#zclip --print-build-logs
+          test -f result/bin/zclip.wasm
+          test -f result/share/zclip/zclip.kdl
+          ls -lh result/bin/zclip.wasm
+
+      # Runs the documented path itself rather than a proxy for it: this is
+      # verbatim what 06-nix-devshell.md promises a contributor can do on a
+      # machine with no rustup, and what docs/dev.md now tells them to do.
+      # Probing the toolchain instead would be weaker -- `rustc --version`
+      # says nothing about targets, and `rustc --print target-list` lists
+      # every target rustc merely *knows about*, including ones with no std
+      # installed, so it passes on a toolchain that cannot build this plugin.
+      # `just build` also covers the shell providing `just` at all.
+      #
+      # This does compile the tree a second time (into cargo's own target/,
+      # sharing nothing with the nix build above, and with no rust-cache to
+      # fall back on). That duplication is deliberate: the point is that the
+      # devShell works for a human running the documented command, which a
+      # sandboxed nix build does not demonstrate.
+      - name: verify `nix develop` + `just build` produces the plugin
+        run: |
+          nix develop --command just build
+          test -f target/wasm32-wasip1/debug/zclip.wasm
+          ls -lh target/wasm32-wasip1/debug/zclip.wasm
