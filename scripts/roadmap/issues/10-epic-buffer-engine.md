@@ -12,13 +12,16 @@ data model, capture (yank) and playback (paste) APIs, named-buffer support,
 persistence, and native unit tests, independent of any system-clipboard bridging.
 
 ## Acceptance criteria
-- [ ] A `PasteBuffer`/`BufferRing` data model exists with a configurable size bound
+- [x] A `PasteBuffer`/`BufferRing` data model exists with a configurable size bound
 - [ ] Named buffers can be set and referenced (tmux `set-buffer -b <name>` equivalent)
-- [ ] Yanking captured pane text pushes a new buffer onto the ring
-- [ ] Pasting writes the most-recent (or selected) buffer's contents into a target pane
-- [ ] The ring survives a plugin reload (persistence mechanism spiked and implemented)
-- [ ] Ring semantics (push, rotate, evict, name lookup) are covered by native unit tests
-- [ ] All logic here is decoupled from clipboard-bridge/system-clipboard concerns
+      — half done: `BufferRing::push_named`/`set_name`/`clear_name` exist and `resolve`
+      looks buffers up by name, but nothing in `crates/zclip` calls them, so no user
+      path creates a named buffer yet. Naming from the list view is M4 (#31).
+- [x] Yanking captured pane text pushes a new buffer onto the ring
+- [x] Pasting writes the most-recent (or selected) buffer's contents into a target pane
+- [x] The ring survives a plugin reload (persistence mechanism spiked and implemented)
+- [x] Ring semantics (push, rotate, evict, name lookup) are covered by native unit tests
+- [x] All logic here is decoupled from clipboard-bridge/system-clipboard concerns
 
 ## Technical notes
 - Since zellij-tile 0.45.0, host functions no-op on non-wasm targets, so the ring model

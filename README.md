@@ -104,7 +104,7 @@ Work is tracked across GitHub milestones M0-M6 (49 tracked issues, 7 of them epi
 | Milestone | Description | Status |
 | --- | --- | --- |
 | M0 | Scaffold & CI | Complete |
-| M1 | Core yank buffer engine (paste-buffer ring, named buffers, yank/paste, persistence) | Complete |
+| M1 | Core yank buffer engine (paste-buffer ring, named buffers, yank/paste, persistence) | Ring, yank/paste and persistence complete; named buffers exist in the engine but nothing creates one yet |
 | M2 | Copy mode & selection (scrollback reading, key interception, motions, char/line/block selection, search) | Largely complete; search and observing external copies outstanding |
 | M3 | System clipboard bridge (`copy_to_clipboard`, backend detection, shell-out backends, OSC 52 fallback) | Partial — only Zellij's own clipboard path is wired up |
 | M4 | Buffer browser UI (list, fuzzy filter, actions, theming) | Partial — list view and actions exist; no filter or theming |
