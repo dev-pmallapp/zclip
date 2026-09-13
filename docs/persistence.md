@@ -183,6 +183,12 @@ in `zclip-core`'s hermetic, dependency-free test suite (see
 
 Set `persist "session"` in your `zclip.kdl` before starting.
 
+All eight steps below were last executed end-to-end against Zellij 0.45.1
+on 2026-09-13 and passed. That run also confirmed empirically what the
+spike above establishes from source: the ring file appeared at
+`<cache>/zellij/file:<plugin-path>/plugin_cache/zclip/ring-<pid>.zclip`,
+and its contents matched the v1 format byte for byte.
+
 1. **Reload survives.** Yank a few buffers, then run
    `zellij action start-or-reload-plugin file:$PWD/target/wasm32-wasip1/debug/zclip.wasm`.
    Expected: the buffer list shows the same buffers after the reload.
